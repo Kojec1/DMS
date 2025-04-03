@@ -1,3 +1,5 @@
-from .convnext import convnext_tiny
+from .bottleneck.convnext import convnext_tiny
+from .head import HPHead
+from .DANet import DANet
 
-__all__ = ['convnext_tiny'] 
+__all__ = ['convnext_tiny', 'HPHead', 'DANet'] 

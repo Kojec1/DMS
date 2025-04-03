@@ -5,18 +5,18 @@ import os
 # Add the project root directory to Python's path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nn.modules.bottleneck.convnext import convnext_tiny
+from nn.modules.bottleneck.mobilenet import mobilenet_v2
 
 def example_usage():
-    # Create a ConvNeXt Tiny feature extractor
-    model = convnext_tiny(pretrained=True)
+    # Create a MobileNetV2 feature extractor
+    model = mobilenet_v2(pretrained=True)
     
     # Set to evaluation mode
     model.eval()
     
     # Create a sample input tensor
     batch_size = 1
-    x = torch.randn(batch_size, 3, 224, 224)
+    x = torch.randn(batch_size, 3, 112, 112)
     
     # Forward pass to extract features
     with torch.no_grad():
@@ -24,9 +24,9 @@ def example_usage():
     
     # Print shapes
     print(f"Input shape: {x.shape}")
-    print(f"Feature shape: {features.shape}")  # Should be [batch_size, 768]
+    print(f"Feature shape: {features.shape}")  # Should be [batch_size, 1280]
     
-    custom_head = torch.nn.Linear(768, 10)  # Example: 10 classes
+    custom_head = torch.nn.Linear(1280, 10)  # 10 classes
     outputs = custom_head(features.squeeze(-1).squeeze(-1))
     print(f"Custom output shape: {outputs.shape}")
     
