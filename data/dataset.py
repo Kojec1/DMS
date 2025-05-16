@@ -16,87 +16,137 @@ class BaseDataset(Dataset):
     def __getitem__(self, index):
         # Subclasses should implement this method to return a data sample.
         raise NotImplementedError("Subclasses must implement the __getitem__ method.")
-
-
-class AutoPOSE(BaseDataset):
-    """
-    Dataset for AutoPOSE.
-    This dataset loads pose data from a directory structure.
     
-    Args:
-        data_dir (str): Directory containing the dataset.
-        annotations_file (str): Path to the annotations file.
-        transform (callable, optional): Optional transform to be applied on images.
-        target_transform (callable, optional): Optional transform to be applied on targets.
-    """
-    def __init__(self, data_dir, annotations_file, transform=None, target_transform=None):
+    
+class MPIIFaceGazeDataset(BaseDataset):
+    def __init__(self, dataset_path, participant_ids, transform=None):
         super().__init__(transform)
-        self.data_dir = data_dir
-        self.target_transform = target_transform
-        
-        # Load annotations
-        self.annotations = self._load_annotations(annotations_file)
-        
-        # Get list of image files and corresponding pose data
-        self.image_paths, self.pose_data = self._parse_annotations()
-        
-    def _load_annotations(self, annotations_file):
-        # Load annotations from file (can be CSV, JSON, etc.)
-        # For example, using a CSV file similar to the face landmarks example:
-        try:
-            import pandas as pd
-            return pd.read_csv(annotations_file)
-        except Exception as e:
-            print(f"Error loading annotations: {e}")
-            # Fallback to an empty DataFrame if file can't be loaded
-            import pandas as pd
-            return pd.DataFrame()
-            
-    def _parse_annotations(self):
-        # Extract image paths and pose data from annotations
-        image_paths = []
-        pose_data = []
-        
-        # Assuming annotations format similar to face landmarks tutorial
-        # with image_name in first column and pose keypoints in subsequent columns
-        for idx, row in self.annotations.iterrows():
-            img_name = row[0]  # First column contains image name
-            img_path = os.path.join(self.data_dir, img_name)
-            
-            # Extract pose keypoints from remaining columns and convert to numpy array
-            keypoints = np.array(row[1:], dtype=np.float32)
-            keypoints = keypoints.reshape(-1, 2)  # Reshape to (num_keypoints, 2)
-            
-            image_paths.append(img_path)
-            pose_data.append(keypoints)
-            
-        return image_paths, pose_data
-        
+        self.dataset_path = dataset_path
+        self.samples = []
+
+        for p_id in participant_ids:
+            participant_folder = os.path.join(self.dataset_path, f"p{p_id:02d}")
+            annotation_file = os.path.join(participant_folder, f"p{p_id:02d}.txt")
+
+            if not os.path.exists(annotation_file):
+                print(f"Warning: Annotation file not found {annotation_file}. Skipping participant {p_id}.")
+                continue
+
+            with open(annotation_file, 'r') as f:
+                for line_idx, line in enumerate(f):
+                    parts = line.strip().split(' ')
+                    if len(parts) != 28:
+                        print(f"Warning: Malformed line {line_idx+1} in {annotation_file}. Expected 28 parts, got {len(parts)}. Content: '{line.strip()}'. Skipping.")
+                        continue
+
+                    image_path_rel = parts[0]
+                    # Ensure image path uses OS-specific separators if necessary, though '/' usually works.
+                    # image_path_rel = image_path_rel.replace('\\', '/').replace('\', '/') # Optional: normalize slashes
+                    image_path = os.path.join(participant_folder, image_path_rel)
+                    
+                    try:
+                        # Dimensions 2-3: Gaze location on screen
+                        gaze_screen_px_np = np.array([float(parts[1]), float(parts[2])], dtype=np.float32)
+                        
+                        # Dimensions 4-15: Facial landmarks
+                        facial_landmarks_np = np.array([float(p) for p in parts[3:15]], dtype=np.float32).reshape(6, 2)
+                        
+                        # Dimensions 16-18: Head pose rotation vector (Rodrigues)
+                        head_pose_rvec_np = np.array([float(p) for p in parts[15:18]], dtype=np.float32)
+                        
+                        # Dimensions 19-21: Head pose translation vector
+                        head_pose_tvec_np = np.array([float(p) for p in parts[18:21]], dtype=np.float32)
+                        
+                        # Dimensions 22-24: Face center in camera coordinates
+                        face_center_cam_np = np.array([float(p) for p in parts[21:24]], dtype=np.float32)
+                        
+                        # Dimensions 25-27: 3D gaze target in camera coordinates
+                        gaze_target_cam_np = np.array([float(p) for p in parts[24:27]], dtype=np.float32)
+                        
+                        # Dimension 28: Evaluation eye
+                        eval_eye_str = parts[27]
+
+                        # Calculate 3D gaze direction vector
+                        gaze_direction_cam_3d = gaze_target_cam_np - face_center_cam_np
+                        
+                        norm_gaze_direction_val = np.linalg.norm(gaze_direction_cam_3d)
+                        
+                        if norm_gaze_direction_val == 0:
+                            # Handle zero vector case for gaze direction
+                            pitch = 0.0
+                            yaw = 0.0
+                            # normalized_gaze_vec = np.array([0,0,-1], dtype=np.float32) # Default forward gaze if needed elsewhere
+                        else:
+                            normalized_gaze_vec = gaze_direction_cam_3d / norm_gaze_direction_val
+                            # Pitch (vertical angle)
+                            # Clamp asin argument to [-1, 1] to prevent domain errors from float precision issues
+                            asin_arg = np.clip(-normalized_gaze_vec[1], -1.0, 1.0)
+                            pitch = np.arcsin(asin_arg)
+                            # Yaw (horizontal angle)
+                            yaw = np.arctan2(-normalized_gaze_vec[0], -normalized_gaze_vec[2])
+
+                        gaze_2d_angles_np = np.array([pitch, yaw], dtype=np.float32)
+
+                        sample_data = {
+                            'image_path': image_path,
+                            'gaze_screen_px': gaze_screen_px_np,
+                            'facial_landmarks': facial_landmarks_np,
+                            'head_pose_rvec': head_pose_rvec_np,
+                            'head_pose_tvec': head_pose_tvec_np,
+                            'face_center_cam': face_center_cam_np,
+                            'gaze_target_cam': gaze_target_cam_np,
+                            'eval_eye': eval_eye_str,
+                            'gaze_direction_cam_3d': gaze_direction_cam_3d.astype(np.float32),
+                            'gaze_2d_angles': gaze_2d_angles_np
+                        }
+                        self.samples.append(sample_data)
+
+                    except ValueError as e:
+                        print(f"Warning: ValueError parsing numeric data in line {line_idx+1} in {annotation_file}: '{line.strip()}'. Error: {e}. Skipping.")
+                        continue
+                    except IndexError as e:
+                        print(f"Warning: IndexError processing line {line_idx+1} in {annotation_file}: '{line.strip()}'. Error: {e}. Skipping.")
+                        continue
+
+
     def __len__(self):
-        return len(self.image_paths)
-    
+        return len(self.samples)
+
     def __getitem__(self, index):
-        # Load image
-        img_path = self.image_paths[index]
-        image = Image.open(img_path).convert('RGB')
+        sample = self.samples[index]
+        image_path = sample['image_path']
         
-        # Get pose data
-        pose = self.pose_data[index]
-        
-        # Apply transforms
+        try:
+            image = Image.open(image_path).convert('RGB')
+        except FileNotFoundError:
+            print(f"Warning: File not found {image_path} for sample index {index}. Attempting to load next valid sample.")
+            if len(self.samples) == 0:
+                 raise RuntimeError("No samples available in the dataset.")
+            if len(self.samples) > 1: # Avoid infinite loop if only one sample and it's missing
+                 return self.__getitem__((index + 1) % len(self.samples)) # Try next, wrap around
+            else: # Only one sample and it's missing
+                 raise RuntimeError(f"Could not load the only image in the dataset: {image_path}")
+
+
+        item_to_return = {}
         if self.transform:
-            image = self.transform(image)
-            
-        if self.target_transform:
-            pose = self.target_transform(pose)
+            item_to_return['image'] = self.transform(image)
         else:
-            # Convert to tensor by default
-            pose = torch.from_numpy(pose)
-            
-        # Return sample as a dictionary
-        return {
-            'image': image,
-            'pose': pose,
-            'path': img_path
-        }
+            item_to_return['image'] = image # Or convert to tensor if no other transform
+
+        # Convert numpy arrays to tensors
+        item_to_return['gaze_screen_px'] = torch.from_numpy(sample['gaze_screen_px'])
+        item_to_return['facial_landmarks'] = torch.from_numpy(sample['facial_landmarks'])
+        item_to_return['head_pose_rvec'] = torch.from_numpy(sample['head_pose_rvec'])
+        item_to_return['head_pose_tvec'] = torch.from_numpy(sample['head_pose_tvec'])
+        item_to_return['face_center_cam'] = torch.from_numpy(sample['face_center_cam'])
+        item_to_return['gaze_target_cam'] = torch.from_numpy(sample['gaze_target_cam'])
+        item_to_return['gaze_direction_cam_3d'] = torch.from_numpy(sample['gaze_direction_cam_3d'])
+        item_to_return['gaze_2d_angles'] = torch.from_numpy(sample['gaze_2d_angles'])
         
+        # Non-tensor data
+        item_to_return['eval_eye'] = sample['eval_eye'] # String
+        item_to_return['image_path'] = image_path # String, for debugging or reference
+
+        return item_to_return
+
