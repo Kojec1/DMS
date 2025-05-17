@@ -21,5 +21,6 @@ def convnext_tiny(pretrained: bool = False, **kwargs) -> nn.Module:
     
     # Remove the classification head
     feature_extractor = nn.Sequential(*list(model.children())[:-1])
+    feature_extractor.out_features = 768
     
     return feature_extractor
