@@ -140,12 +140,10 @@ def main():
     train_dataset = MPIIFaceGazeDataset(dataset_path=args.data_dir, 
                                         participant_ids=train_ids, 
                                         transform=train_transform,
-                                        img_size=args.img_size,
                                         is_train=True)
     val_dataset = MPIIFaceGazeDataset(dataset_path=args.data_dir, 
                                       participant_ids=val_ids, 
                                       transform=val_transform,
-                                      img_size=args.img_size,
                                       is_train=False)
     
     if not train_dataset.samples:

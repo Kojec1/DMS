@@ -21,11 +21,10 @@ class BaseDataset(Dataset):
     
     
 class MPIIFaceGazeDataset(BaseDataset):
-    def __init__(self, dataset_path, participant_ids, transform=None, img_size=224, is_train=False):
+    def __init__(self, dataset_path, participant_ids, transform=None, is_train=False):
         super().__init__(transform)
         self.dataset_path = dataset_path
         self.samples = []
-        self.img_size = img_size
         self.is_train = is_train
 
         for p_id in participant_ids:
@@ -121,6 +120,7 @@ class MPIIFaceGazeDataset(BaseDataset):
         
         try:
             image = Image.open(image_path).convert('RGB')
+            original_width, original_height = image.size
         except FileNotFoundError:
             print(f"Warning: File not found {image_path} for sample index {index}. Attempting to load next valid sample.")
             if len(self.samples) == 0:
@@ -133,11 +133,11 @@ class MPIIFaceGazeDataset(BaseDataset):
         # Image and Landmark Augmentation (if training)
         if self.is_train and random.random() > 0.5: # 50% chance to flip
             image = TF.hflip(image)
-            landmarks_np[:, 0] = self.img_size - landmarks_np[:, 0]
+            landmarks_np[:, 0] = original_width - landmarks_np[:, 0]
 
         # Normalize landmarks to [0, 1]
-        landmarks_np[:, 0] /= self.img_size
-        landmarks_np[:, 1] /= self.img_size
+        landmarks_np[:, 0] /= original_width
+        landmarks_np[:, 1] /= original_height
         # Clip to ensure they are within [0,1] after division and potential flipping arithmetic
         landmarks_np = np.clip(landmarks_np, 0.0, 1.0)
 
