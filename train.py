@@ -7,6 +7,7 @@ import os
 import argparse
 import time
 from tqdm import tqdm
+from torch.profiler import profile, record_function, ProfilerActivity
 
 from nn.modules.facial_landmark_estimator import FacialLandmarkEstimator
 from data.dataset import MPIIFaceGazeDataset
@@ -50,38 +51,88 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epo
     total_loss = 0.0
     start_time = time.time()
 
-    for batch_idx, batch_data in tqdm(enumerate(dataloader), total=len(dataloader), desc="Training"):
-        images = batch_data['image'].to(device)
-        # MPIIFaceGazeDataset returns landmarks as (N, 6, 2).
-        # Model outputs (N, 12). Flatten targets.
-        targets = batch_data['facial_landmarks'].to(device).view(images.size(0), -1)
-        
-        optimizer.zero_grad()
-        
-        if args.amp:
-            with torch.amp.autocast(device_type='cuda'):
-                outputs = model(images)
-                loss = criterion(outputs, targets)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            outputs = model(images)
-            loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.step()
-        
-        total_loss += loss.item()
-        
-        if (batch_idx + 1) % args.log_interval == 0 or batch_idx == len(dataloader) -1:
-            current_loss = loss.item()
-            avg_epoch_loss = total_loss / (batch_idx + 1)
-            elapsed_time = time.time() - start_time
-            print(f'Epoch [{epoch+1}/{args.epochs}], Step [{batch_idx+1}/{len(dataloader)}], ' \
-                  f'Loss: {current_loss:.4f} (Avg Epoch: {avg_epoch_loss:.4f}), Time: {elapsed_time:.2f}s')
-            start_time = time.time() # Reset timer for next log interval reporting
+    # --- PyTorch Profiler Integration ---
+    # Profile a few batches (e.g., first 5) in the first epoch for detailed analysis
+    # To avoid overhead, don't profile every epoch or every batch unless specifically needed for debugging.
+    profile_batches = 5 
+    if epoch == 0: # Profile only during the first epoch, for example
+        profiler_context = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
+            record_shapes=True, # Records input shapes
+            profile_memory=True, # Tracks memory usage
+            with_stack=True # Records call stacks, might add overhead
+        )
+    else:
+        # Create a dummy context manager if not profiling to avoid changing loop structure
+        class DummyContextManager:
+            def __enter__(self): return None
+            def __exit__(self, exc_type, exc_value, traceback): pass
+        profiler_context = DummyContextManager()
+    # --- End Profiler Integration ---
+
+    with profiler_context as prof: # Use the selected profiler context
+        for batch_idx, batch_data in tqdm(enumerate(dataloader), total=len(dataloader), desc="Training"):
+            if epoch == 0 and batch_idx >= profile_batches and prof is not None: # Stop profiling after 'profile_batches' in the first epoch
+                 if hasattr(prof, 'stop'): # Check if it's the actual profiler
+                    break # Exit the loop early for this profiling run to get results faster
+
+
+            with record_function("data_loading_and_preprocessing"): # Custom label for this block
+                images = batch_data['image'].to(device)
+                targets = batch_data['facial_landmarks'].to(device).view(images.size(0), -1)
             
-    return total_loss / len(dataloader)
+            # The print statement for targets can be verbose, consider removing for profiling
+            # print(f"Targets: {targets[0]}")
+
+            optimizer.zero_grad()
+            
+            if args.amp:
+                with record_function("forward_backward_amp"): # Custom label
+                    with torch.amp.autocast(device_type='cuda'):
+                        outputs = model(images)
+                        loss = criterion(outputs, targets)
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+            else:
+                with record_function("forward_backward_no_amp"): # Custom label
+                    outputs = model(images)
+                    loss = criterion(outputs, targets)
+                    loss.backward()
+                    optimizer.step()
+            
+            # The print statement for outputs can be verbose, consider removing for profiling
+            # print(f"Outputs: {outputs[0]}")
+            
+            total_loss += loss.item()
+            
+            if (batch_idx + 1) % args.log_interval == 0 or batch_idx == len(dataloader) -1:
+                current_loss = loss.item()
+                avg_epoch_loss = total_loss / (batch_idx + 1)
+                elapsed_time = time.time() - start_time
+                # print(f'Epoch [{epoch+1}/{args.epochs}], Step [{batch_idx+1}/{len(dataloader)}], ' \ # Original print
+                #       f'Loss: {current_loss:.4f} (Avg Epoch: {avg_epoch_loss:.4f}), Time: {elapsed_time:.2f}s')
+                # Quieter print for profiling, or remove entirely if focusing on profiler output
+                if not (epoch == 0 and prof is not None and hasattr(prof, 'stop')): # Don't print if inside active profiling period that will break
+                    print(f'Epoch [{epoch+1}/{args.epochs}], Step [{batch_idx+1}/{len(dataloader)}], Loss: {current_loss:.4f}')
+                start_time = time.time() 
+
+    if epoch == 0 and prof is not None and hasattr(prof, 'key_averages'): # Check if it's the actual profiler
+        print("--- Profiler Results (First Epoch, First Few Batches) ---")
+        print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=15))
+        print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=15))
+        # To export trace for Chrome Trace Viewer:
+        # prof.export_chrome_trace(os.path.join(args.checkpoint_dir, "profiler_trace_epoch0.json"))
+        # print(f"Profiler trace saved to {os.path.join(args.checkpoint_dir, 'profiler_trace_epoch0.json')}")
+        # To export stack trace:
+        # prof.export_stacks(os.path.join(args.checkpoint_dir, "profiler_stacks_epoch0.txt"), "self_cuda_time_total")
+        # print(f"Profiler stacks saved to {os.path.join(args.checkpoint_dir, 'profiler_stacks_epoch0.txt')}")
+        print("--- End Profiler Results ---")
+        # Optionally, exit after profiling the first few batches of the first epoch to focus on analysis
+        # import sys
+        # sys.exit("Exiting after profiling.")
+            
+    return total_loss / (len(dataloader) if (epoch != 0 or prof is None or not hasattr(prof, 'stop') or batch_idx == len(dataloader)-1) else profile_batches)
 
 def validate(model, dataloader, criterion, device, args):
     model.eval()
@@ -200,9 +251,15 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         print(f"--- Epoch {epoch+1}/{args.epochs} ---")
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, scaler, device, epoch, args)
+        
+        # If train_one_epoch exited early due to profiling, we might not want to proceed further for this run
+        if epoch == 0 and len(train_loader) > 5 and train_loss == 0 : # Heuristic: if profiling broke early and loss is 0
+            print("Exiting after profiling run.")
+            break
+
         val_loss = validate(model, val_loader, criterion, device, args)
         
-        scheduler.step() # Step the scheduler after each epoch
+        scheduler.step() # Step the scheduler
 
         train_loss_history.append(train_loss)
         val_loss_history.append(val_loss)
