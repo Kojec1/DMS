@@ -21,14 +21,23 @@ class BaseDataset(Dataset):
     
     
 class MPIIFaceGazeDataset(BaseDataset):
-    def __init__(self, dataset_path, participant_ids, transform=None, is_train=False, crop_to_face_bbox=True, crop_padding_factor=1.0):
+    def __init__(self, dataset_path, participant_ids, transform=None, is_train=False, crop_to_face_bbox=True, train_crop_padding_range=(1.0, 2.0), test_crop_padding_factor=1.0, train_random_shift_fraction=0.2):
         super().__init__(transform)
         self.dataset_path = dataset_path
         self.samples = []
         self.is_train = is_train
         self.crop_to_face_bbox = crop_to_face_bbox
-        self.crop_padding_factor = crop_padding_factor
+        if not isinstance(train_crop_padding_range, tuple) or len(train_crop_padding_range) != 2:
+            raise ValueError("train_crop_padding_range must be a tuple of two floats (min, max).")
+        if not (isinstance(test_crop_padding_factor, float) or isinstance(test_crop_padding_factor, int)):
+            raise ValueError("test_crop_padding_factor must be a float or int.")
+        if not (isinstance(train_random_shift_fraction, float) or isinstance(train_random_shift_fraction, int)):
+            raise ValueError("train_random_shift_fraction must be a float or int.")
 
+        self.train_crop_padding_range = train_crop_padding_range
+        self.test_crop_padding_factor = float(test_crop_padding_factor)
+        self.train_random_shift_fraction = float(train_random_shift_fraction)
+        
         for p_id in participant_ids:
             participant_folder = os.path.join(self.dataset_path, f"p{p_id:02d}")
             annotation_file = os.path.join(participant_folder, f"p{p_id:02d}.txt")
@@ -139,6 +148,16 @@ class MPIIFaceGazeDataset(BaseDataset):
         effective_width, effective_height = original_width, original_height
 
         if self.crop_to_face_bbox:
+            padding_factor_to_use = 0.0
+            apply_random_shift = False
+
+            if self.is_train:
+                padding_factor_to_use = random.uniform(self.train_crop_padding_range[0], self.train_crop_padding_range[1])
+                if self.train_random_shift_fraction > 0.0:
+                    apply_random_shift = True
+            else: # is_test
+                padding_factor_to_use = self.test_crop_padding_factor
+
             # Calculate bounding box from original landmarks
             x_min_lm, y_min_lm = np.min(original_landmarks_np, axis=0)
             x_max_lm, y_max_lm = np.max(original_landmarks_np, axis=0)
@@ -150,20 +169,81 @@ class MPIIFaceGazeDataset(BaseDataset):
             bbox_width = max(0, bbox_width)
             bbox_height = max(0, bbox_height)
 
-            pad_w_half = (bbox_width * self.crop_padding_factor) / 2.0
-            pad_h_half = (bbox_height * self.crop_padding_factor) / 2.0
+            pad_w_half = (bbox_width * padding_factor_to_use) / 2.0
+            pad_h_half = (bbox_height * padding_factor_to_use) / 2.0
 
-            # Calculate float crop coordinates relative to the original image
-            f_crop_x1 = x_min_lm - pad_w_half
-            f_crop_y1 = y_min_lm - pad_h_half
-            f_crop_x2 = x_max_lm + pad_w_half
-            f_crop_y2 = y_max_lm + pad_h_half
+            # Calculate initial floating point padded crop box (before shift)
+            f_padded_crop_x1 = x_min_lm - pad_w_half
+            f_padded_crop_y1 = y_min_lm - pad_h_half
+            f_padded_crop_x2 = x_max_lm + pad_w_half
+            f_padded_crop_y2 = y_max_lm + pad_h_half
+            
+            # Initialize final floating crop coordinates with the padded box
+            final_f_crop_x1, final_f_crop_y1 = f_padded_crop_x1, f_padded_crop_y1
+            final_f_crop_x2, final_f_crop_y2 = f_padded_crop_x2, f_padded_crop_y2
+
+            if apply_random_shift:
+                # Max shift to keep original landmark bbox inside the padded box
+                # dx_max_lm_constraint is pad_w_half, dx_min_lm_constraint is -pad_w_half
+                dx_min_lm_constraint = -pad_w_half 
+                dx_max_lm_constraint = pad_w_half
+                dy_min_lm_constraint = -pad_h_half
+                dy_max_lm_constraint = pad_h_half
+                
+                # Constraint from image boundaries for the shifted box:
+                # 0 <= f_padded_crop_x1 + dx  => dx >= -f_padded_crop_x1
+                # f_padded_crop_x2 + dx <= original_width => dx <= original_width - f_padded_crop_x2
+                dx_min_img_constraint = -f_padded_crop_x1
+                dx_max_img_constraint = original_width - f_padded_crop_x2
+                dy_min_img_constraint = -f_padded_crop_y1
+                dy_max_img_constraint = original_height - f_padded_crop_y2
+
+                # Combine landmark and image boundary constraints for dx
+                actual_dx_min = max(dx_min_lm_constraint, dx_min_img_constraint)
+                actual_dx_max = min(dx_max_lm_constraint, dx_max_img_constraint)
+                
+                # Combine landmark and image boundary constraints for dy
+                actual_dy_min = max(dy_min_lm_constraint, dy_min_img_constraint)
+                actual_dy_max = min(dy_max_lm_constraint, dy_max_img_constraint)
+
+                random_dx = 0.0
+                random_dy = 0.0
+
+                if actual_dx_max > actual_dx_min: # Check if a valid range for dx exists
+                    padded_box_width = f_padded_crop_x2 - f_padded_crop_x1
+                    # Avoid issues if padded_box_width is zero or very small
+                    if padded_box_width > 1e-6 : 
+                        max_abs_shift_x = self.train_random_shift_fraction * padded_box_width
+                        
+                        # Intersect with user-defined relative shift limit
+                        shift_limit_x_min = max(actual_dx_min, -max_abs_shift_x)
+                        shift_limit_x_max = min(actual_dx_max, max_abs_shift_x)
+
+                        if shift_limit_x_max > shift_limit_x_min:
+                             random_dx = random.uniform(shift_limit_x_min, shift_limit_x_max)
+                
+                if actual_dy_max > actual_dy_min: # Check if a valid range for dy exists
+                    padded_box_height = f_padded_crop_y2 - f_padded_crop_y1
+                    if padded_box_height > 1e-6:
+                        max_abs_shift_y = self.train_random_shift_fraction * padded_box_height
+
+                        # Intersect with user-defined relative shift limit
+                        shift_limit_y_min = max(actual_dy_min, -max_abs_shift_y)
+                        shift_limit_y_max = min(actual_dy_max, max_abs_shift_y)
+
+                        if shift_limit_y_max > shift_limit_y_min:
+                            random_dy = random.uniform(shift_limit_y_min, shift_limit_y_max)
+                
+                final_f_crop_x1 += random_dx
+                final_f_crop_y1 += random_dy
+                final_f_crop_x2 += random_dx
+                final_f_crop_y2 += random_dy
             
             # Convert to integer coordinates for cropping, clamping to original image boundaries
-            crop_x1_final = int(round(np.maximum(0, f_crop_x1)))
-            crop_y1_final = int(round(np.maximum(0, f_crop_y1)))
-            crop_x2_final = int(round(np.minimum(original_width, f_crop_x2)))
-            crop_y2_final = int(round(np.minimum(original_height, f_crop_y2)))
+            crop_x1_final = int(round(np.maximum(0, final_f_crop_x1)))
+            crop_y1_final = int(round(np.maximum(0, final_f_crop_y1)))
+            crop_x2_final = int(round(np.minimum(original_width, final_f_crop_x2)))
+            crop_y2_final = int(round(np.minimum(original_height, final_f_crop_y2)))
 
             if crop_x1_final < crop_x2_final and crop_y1_final < crop_y2_final:
                 cropped_image_candidate = image.crop((crop_x1_final, crop_y1_final, crop_x2_final, crop_y2_final))
