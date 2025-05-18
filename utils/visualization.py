@@ -19,6 +19,7 @@ def plot_training_history(train_loss_history, val_loss_history, save_path):
     plt.title('Training and Validation Loss')
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
+    plt.yscale('log')
     plt.legend()
     plt.grid(True)
 

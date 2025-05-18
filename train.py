@@ -116,7 +116,6 @@ def main():
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Standard ImageNet normalization
     train_transform = transforms.Compose([
         transforms.Resize((args.img_size, args.img_size)),
-        transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
         transforms.ToTensor(),
         normalize,
@@ -138,8 +137,16 @@ def main():
     print(f"Training with participant IDs: {train_ids}")
     print(f"Validating with participant IDs: {val_ids}")
 
-    train_dataset = MPIIFaceGazeDataset(dataset_path=args.data_dir, participant_ids=train_ids, transform=train_transform)
-    val_dataset = MPIIFaceGazeDataset(dataset_path=args.data_dir, participant_ids=val_ids, transform=val_transform)
+    train_dataset = MPIIFaceGazeDataset(dataset_path=args.data_dir, 
+                                        participant_ids=train_ids, 
+                                        transform=train_transform,
+                                        img_size=args.img_size,
+                                        is_train=True)
+    val_dataset = MPIIFaceGazeDataset(dataset_path=args.data_dir, 
+                                      participant_ids=val_ids, 
+                                      transform=val_transform,
+                                      img_size=args.img_size,
+                                      is_train=False)
     
     if not train_dataset.samples:
         print(f"Error: No training samples found. Check data_dir ('{args.data_dir}') and train_participant_ids ('{args.train_participant_ids}').")

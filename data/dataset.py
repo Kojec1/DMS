@@ -3,6 +3,8 @@ import os
 import numpy as np
 import torch
 from PIL import Image
+import torchvision.transforms.functional as TF
+import random
 
 class BaseDataset(Dataset):
     """Base PyTorch Dataset template. Custom datasets should inherit from this class."""
@@ -19,10 +21,12 @@ class BaseDataset(Dataset):
     
     
 class MPIIFaceGazeDataset(BaseDataset):
-    def __init__(self, dataset_path, participant_ids, transform=None):
+    def __init__(self, dataset_path, participant_ids, transform=None, img_size=224, is_train=False):
         super().__init__(transform)
         self.dataset_path = dataset_path
         self.samples = []
+        self.img_size = img_size
+        self.is_train = is_train
 
         for p_id in participant_ids:
             participant_folder = os.path.join(self.dataset_path, f"p{p_id:02d}")
@@ -40,8 +44,6 @@ class MPIIFaceGazeDataset(BaseDataset):
                         continue
 
                     image_path_rel = parts[0]
-                    # Ensure image path uses OS-specific separators if necessary, though '/' usually works.
-                    # image_path_rel = image_path_rel.replace('\\', '/').replace('\', '/') # Optional: normalize slashes
                     image_path = os.path.join(participant_folder, image_path_rel)
                     
                     try:
@@ -115,6 +117,7 @@ class MPIIFaceGazeDataset(BaseDataset):
     def __getitem__(self, index):
         sample = self.samples[index]
         image_path = sample['image_path']
+        landmarks_np = sample['facial_landmarks'].copy()
         
         try:
             image = Image.open(image_path).convert('RGB')
@@ -127,16 +130,26 @@ class MPIIFaceGazeDataset(BaseDataset):
             else: # Only one sample and it's missing
                  raise RuntimeError(f"Could not load the only image in the dataset: {image_path}")
 
+        # Image and Landmark Augmentation (if training)
+        if self.is_train and random.random() > 0.5: # 50% chance to flip
+            image = TF.hflip(image)
+            landmarks_np[:, 0] = self.img_size - landmarks_np[:, 0]
+
+        # Normalize landmarks to [0, 1]
+        landmarks_np[:, 0] /= self.img_size
+        landmarks_np[:, 1] /= self.img_size
+        # Clip to ensure they are within [0,1] after division and potential flipping arithmetic
+        landmarks_np = np.clip(landmarks_np, 0.0, 1.0)
 
         item_to_return = {}
         if self.transform:
             item_to_return['image'] = self.transform(image)
         else:
-            item_to_return['image'] = image # Or convert to tensor if no other transform
+            item_to_return['image'] = TF.to_tensor(image)
 
         # Convert numpy arrays to tensors
         item_to_return['gaze_screen_px'] = torch.from_numpy(sample['gaze_screen_px'])
-        item_to_return['facial_landmarks'] = torch.from_numpy(sample['facial_landmarks'])
+        item_to_return['facial_landmarks'] = torch.from_numpy(landmarks_np.astype(np.float32))
         item_to_return['head_pose_rvec'] = torch.from_numpy(sample['head_pose_rvec'])
         item_to_return['head_pose_tvec'] = torch.from_numpy(sample['head_pose_tvec'])
         item_to_return['face_center_cam'] = torch.from_numpy(sample['face_center_cam'])
