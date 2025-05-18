@@ -191,30 +191,34 @@ def main():
             continue
 
         image_tensor_resized = sample_transformed['image'].to(device)
-        true_landmarks_original_scale = sample_transformed['facial_landmarks'].clone().float()
 
-        # Scale true landmarks from original image coords to resized image coords
-        scale_x = args.img_size / original_width
-        scale_y = args.img_size / original_height
+        # Define the normalization factor used by MPIIFaceGazeDataset
+        # MPIIFaceGazeDataset normalizes original pixel coordinates by its self.img_size (default 224)
+        # DATASET_NORMALIZATION_FACTOR = 224.0 # This was incorrect. Dataset normalizes by original image dimensions.
+
+        # --- Ground Truth Landmarks --- 
+        # sample_transformed['facial_landmarks'] are normalized by original image dimensions (range [0,1])
+        true_landmarks_from_dataset = sample_transformed['facial_landmarks'].clone().float().view(-1, 2)
         
-        scaled_true_landmarks = true_landmarks_original_scale #landmarks are (N,2)
-        scaled_true_landmarks[:, 0] *= scale_x
-        scaled_true_landmarks[:, 1] *= scale_y
+        scaled_true_landmarks = true_landmarks_from_dataset.clone()
+        # Scale normalized [0,1] coordinates to the displayed image size (args.img_size)
+        scaled_true_landmarks[:, 0] = true_landmarks_from_dataset[:, 0] * args.img_size
+        scaled_true_landmarks[:, 1] = true_landmarks_from_dataset[:, 1] * args.img_size
         true_landmarks_for_plot = scaled_true_landmarks.view(-1) # Flatten for plotting function
 
-        # Model expects batch dimension, predicts landmarks for args.img_size scale
+        # --- Predicted Landmarks --- 
+        # Model expects batch dimension.
+        # Assume model outputs landmarks normalized to its input image space (range [0,1]), relative to args.img_size.
         image_batch = image_tensor_resized.unsqueeze(0)
         with torch.no_grad():
-            pred_landmarks_normalized_flat = model(image_batch).squeeze(0).cpu() # Shape (num_landmarks * 2)
+            pred_landmarks_from_model_flat = model(image_batch).squeeze(0).cpu() # Shape (num_landmarks * 2)
         
-        # Reshape to (num_landmarks, 2)
-        pred_landmarks_normalized_reshaped = pred_landmarks_normalized_flat.view(-1, 2)
+        pred_landmarks_from_model = pred_landmarks_from_model_flat.view(-1, 2) # Reshape to (num_landmarks, 2)
         
-        # Convert normalized landmarks to pixel coordinates of the displayed image (args.img_size).
-        scaled_pred_landmarks = pred_landmarks_normalized_reshaped.clone()
-        scaled_pred_landmarks[:, 0] *= args.img_size
-        scaled_pred_landmarks[:, 1] *= args.img_size
-        
+        scaled_pred_landmarks = pred_landmarks_from_model.clone()
+        # Scale normalized [0,1] coordinates to the displayed image size (args.img_size)
+        scaled_pred_landmarks[:, 0] = pred_landmarks_from_model[:, 0] * args.img_size
+        scaled_pred_landmarks[:, 1] = pred_landmarks_from_model[:, 1] * args.img_size
         pred_landmarks_for_plot = scaled_pred_landmarks.view(-1) # Flatten for plotting function
         
         # plot_image_and_landmarks expects landmarks in pixel coordinates of the displayed image
