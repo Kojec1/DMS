@@ -166,6 +166,17 @@ def main():
     print(f"Model: FacialLandmarkEstimator initialized with {args.num_landmarks} landmarks.")
     print(f"Backbone pretrained: {not args.no_pretrained_backbone}")
 
+    # Attempt to compile the model with torch.compile() if available (PyTorch 2.0+)
+    if hasattr(torch, 'compile'):
+        try:
+            print("Attempting to compile the model with torch.compile()...")
+            model = torch.compile(model)
+            print("Model compiled successfully.")
+        except Exception as e:
+            print(f"Failed to compile model: {e}. Proceeding without compilation.")
+    else:
+        print("torch.compile not available. Proceeding without compilation (requires PyTorch 2.0+ for this feature).")
+
     # Loss and Optimizer
     criterion = nn.MSELoss() # Mean Squared Error for landmark regression
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
