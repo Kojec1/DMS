@@ -214,8 +214,6 @@ def main():
             print(f"Resuming training from checkpoint: {args.resume_checkpoint}")
             start_epoch = load_checkpoint(args.resume_checkpoint, model, optimizer, scheduler, scaler if args.amp else None)
             print(f"Resumed from epoch {start_epoch}. Optimizer LR: {optimizer.param_groups[0]['lr']:.2e}")
-            # Note: If resuming into a warmup phase, the LR will be explicitly set below.
-            # If resuming into main phase, scheduler continues from its loaded state.
         else:
             print(f"Warning: Resume checkpoint not found at {args.resume_checkpoint}")
 
@@ -236,13 +234,13 @@ def main():
             if is_warmup_epoch:
                 # Freeze backbone if it's the first warmup epoch or if it was previously unfrozen
                 if not all(not p.requires_grad for p in model.backbone.parameters()):
-                    print(f"Epoch {epoch+1}: Freezing backbone for warmup.")
+                    print(f"Epoch {epoch+1}: Freezing backbone for warmup phase (epoch < {args.warmup_epochs}).")
                     for param in model.backbone.parameters():
                         param.requires_grad = False
-            elif epoch == args.warmup_epochs: # First epoch *after* warmup
+            else: # Main training phase, i.e., epoch >= args.warmup_epochs
                 # Unfreeze backbone if it was frozen
                 if any(not p.requires_grad for p in model.backbone.parameters()):
-                    print(f"Epoch {epoch+1}: Unfreezing backbone for main training.")
+                    print(f"Epoch {epoch+1}: Unfreezing backbone for main training phase (epoch >= {args.warmup_epochs}).")
                     for param in model.backbone.parameters():
                         param.requires_grad = True
         elif not args.freeze_backbone_warmup and hasattr(model, 'backbone') and isinstance(model.backbone, nn.Module):
