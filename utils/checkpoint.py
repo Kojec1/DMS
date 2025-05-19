@@ -9,10 +9,14 @@ def save_checkpoint(epoch, model, optimizer, scheduler, scaler, filepath):
     print(f"=> Saving checkpoint to {filepath}")
     state = {
         'epoch': epoch,
-        'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
     }
+
+    # Get the state_dict from the original model if it was compiled
+    unwrapped_model = getattr(model, '_orig_mod', model)
+    state['model_state_dict'] = unwrapped_model.state_dict()
+
     if scaler is not None: # For AMP
         state['scaler_state_dict'] = scaler.state_dict()
     torch.save(state, filepath)

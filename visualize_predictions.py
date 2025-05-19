@@ -85,7 +85,7 @@ def plot_image_and_landmarks(ax, image_tensor, true_landmarks, pred_landmarks, i
 
 def main():
     args = get_args()
-    set_seed(args.seed)
+    # set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     print(f"Using device: {device}")
@@ -132,7 +132,8 @@ def main():
         full_dataset = MPIIFaceGazeDataset(
             dataset_path=args.data_dir,
             participant_ids=vis_participant_ids,
-            transform=vis_transform
+            transform=vis_transform,
+            is_train=True,
         )
     except Exception as e:
         print(f"Error initializing MPIIFaceGazeDataset: {e}")
@@ -191,13 +192,6 @@ def main():
             continue
 
         image_tensor_resized = sample_transformed['image'].to(device)
-
-        # Define the normalization factor used by MPIIFaceGazeDataset
-        # MPIIFaceGazeDataset normalizes original pixel coordinates by its self.img_size (default 224)
-        # DATASET_NORMALIZATION_FACTOR = 224.0 # This was incorrect. Dataset normalizes by original image dimensions.
-
-        # --- Ground Truth Landmarks --- 
-        # sample_transformed['facial_landmarks'] are normalized by original image dimensions (range [0,1])
         true_landmarks_from_dataset = sample_transformed['facial_landmarks'].clone().float().view(-1, 2)
         
         scaled_true_landmarks = true_landmarks_from_dataset.clone()
@@ -206,12 +200,10 @@ def main():
         scaled_true_landmarks[:, 1] = true_landmarks_from_dataset[:, 1] * args.img_size
         true_landmarks_for_plot = scaled_true_landmarks.view(-1) # Flatten for plotting function
 
-        # --- Predicted Landmarks --- 
-        # Model expects batch dimension.
-        # Assume model outputs landmarks normalized to its input image space (range [0,1]), relative to args.img_size.
         image_batch = image_tensor_resized.unsqueeze(0)
         with torch.no_grad():
             pred_landmarks_from_model_flat = model(image_batch).squeeze(0).cpu() # Shape (num_landmarks * 2)
+            print(f"Predicted landmarks: {pred_landmarks_from_model_flat}")
         
         pred_landmarks_from_model = pred_landmarks_from_model_flat.view(-1, 2) # Reshape to (num_landmarks, 2)
         
