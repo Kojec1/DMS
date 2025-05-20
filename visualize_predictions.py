@@ -11,10 +11,6 @@ from nn.modules.facial_landmark_estimator import FacialLandmarkEstimator
 from data.dataset import MPIIFaceGazeDataset
 from utils.misc import set_seed
 
-# ImageNet mean and std for unnormalization
-MEAN = torch.tensor([0.485, 0.456, 0.406])
-STD = torch.tensor([0.229, 0.224, 0.225])
-
 
 def get_args():
     parser = argparse.ArgumentParser(description='Visualize predictions from Facial Landmark Estimator')
@@ -30,21 +26,22 @@ def get_args():
                         help='Number of facial landmarks (MPIIFaceGaze has 6)')
     parser.add_argument('--img_size', type=int, default=224, 
                         help='Input image size used during training (e.g., 224)')
+    parser.add_argument('--input_channels', type=int, default=1, choices=[1, 3], # Added
+                        help='Number of input image channels model was trained with (1 for grayscale, 3 for RGB)')
     parser.add_argument('--seed', type=int, default=42, 
                         help='Random seed for reproducibility of sample selection')
     parser.add_argument('--no_cuda', action='store_true', help='Disable CUDA even if available')
     
     return parser.parse_args()
 
-def unnormalize_image(tensor):
-    """Unnormalize a tensor image with ImageNet mean and std."""
-    tensor = tensor.clone()
-    for t, m, s in zip(tensor, MEAN, STD):
-        t.mul_(s).add_(m)
-    return tensor
+# Removed global unnormalize_image, will be handled in plot_image_and_landmarks or a more specific utility if needed
 
-def load_model_for_visualization(checkpoint_path, num_landmarks, device):
-    model = FacialLandmarkEstimator(num_landmarks=num_landmarks, pretrained_backbone=False)
+def load_model_for_visualization(checkpoint_path, num_landmarks, device, in_channels): # Added in_channels
+    model = FacialLandmarkEstimator(
+        num_landmarks=num_landmarks, 
+        pretrained_backbone=False, # Set to False, as we are loading a trained model's weights
+        in_channels=in_channels     # Pass in_channels
+    )
     if not os.path.isfile(checkpoint_path):
         print(f"Error: Checkpoint file not found at {checkpoint_path}")
         return None
@@ -59,22 +56,42 @@ def load_model_for_visualization(checkpoint_path, num_landmarks, device):
     else:
         model_state_dict = checkpoint
 
-    model.load_state_dict(model_state_dict)
+    # model.load_state_dict(model_state_dict)
     model.to(device)
     model.eval()
-    print("Model loaded successfully.")
+    print(f"Model loaded successfully with {in_channels} input channel(s).")
     return model
 
-def plot_image_and_landmarks(ax, image_tensor, true_landmarks, pred_landmarks, img_size):
+def plot_image_and_landmarks(ax, image_tensor_cpu, true_landmarks, pred_landmarks, current_mean, current_std):
     """Plots the image with true and predicted landmarks."""
-    # Unnormalize and prepare image for display
-    img_display = unnormalize_image(image_tensor.cpu())
-    img_display = img_display.numpy().transpose(1, 2, 0) # C, H, W -> H, W, C
-    img_display = np.clip(img_display, 0, 1) # Ensure values are in [0,1] for display
+    # Unnormalize the image tensor
+    img_unnormalized = image_tensor_cpu.clone()
+    # Ensure current_mean and current_std are tensors for consistent indexing
+    if not isinstance(current_mean, torch.Tensor): current_mean = torch.tensor(current_mean)
+    if not isinstance(current_std, torch.Tensor): current_std = torch.tensor(current_std)
 
-    ax.imshow(img_display)
+    for c_idx in range(img_unnormalized.size(0)):
+        img_unnormalized[c_idx].mul_(current_std[c_idx]).add_(current_mean[c_idx])
     
-    # Reshape to (num_landmarks, 2) for plotting
+    img_display_np = img_unnormalized.cpu().numpy()
+
+    # Prepare for display (handle C,H,W to H,W,C or H,W)
+    if img_display_np.shape[0] == 1:  # Grayscale (1, H, W)
+        img_display_np = img_display_np.squeeze(0)  # -> (H, W)
+    elif img_display_np.shape[0] == 3:  # RGB (3, H, W)
+        img_display_np = img_display_np.transpose(1, 2, 0)  # -> (H, W, 3)
+    else: # Should not happen with 1 or 3 channels
+        print(f"Warning: Unexpected image tensor shape for display: {img_display_np.shape}")
+
+    img_display_np = np.clip(img_display_np, 0, 1) # Ensure values are in [0,1] for display
+
+    # Display image
+    if img_display_np.ndim == 2 or (img_display_np.ndim == 3 and img_display_np.shape[-1] == 1):
+        ax.imshow(img_display_np, cmap='gray', vmin=0, vmax=1)
+    else:
+        ax.imshow(img_display_np, vmin=0, vmax=1) # For RGB
+    
+    # Reshape landmarks (already scaled to img_size) for plotting
     true_lmks = true_landmarks.cpu().numpy().reshape(-1, 2)
     pred_lmks = pred_landmarks.cpu().numpy().reshape(-1, 2)
 
@@ -90,6 +107,16 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     print(f"Using device: {device}")
 
+    # Define MEAN and STD for normalization/unnormalization based on input_channels
+    if args.input_channels == 1:
+        CURRENT_MEAN = [0.449] # Mean for grayscale, as per train.py
+        CURRENT_STD = [0.226]   # Std for grayscale, as per train.py
+        print("Using 1-channel (grayscale) normalization.")
+    else: # Default to 3 channels (RGB)
+        CURRENT_MEAN = [0.485, 0.456, 0.406] # Standard ImageNet mean
+        CURRENT_STD = [0.229, 0.224, 0.225]  # Standard ImageNet std
+        print("Using 3-channel (RGB) normalization.")
+
     # Parse grid size
     try:
         rows, cols = map(int, args.grid_size.split('x'))
@@ -102,16 +129,16 @@ def main():
     num_samples_to_display = rows * cols
 
     # Load Model
-    model = load_model_for_visualization(args.checkpoint_path, args.num_landmarks, device)
+    model = load_model_for_visualization(args.checkpoint_path, args.num_landmarks, device, args.input_channels)
     if model is None:
         return
 
     # Data Transformations
-    normalize = transforms.Normalize(mean=MEAN, std=STD)
+    data_normalize = transforms.Normalize(mean=CURRENT_MEAN, std=CURRENT_STD)
     vis_transform = transforms.Compose([
-        transforms.Resize((args.img_size, args.img_size)),
-        transforms.ToTensor(),
-        normalize,
+        transforms.Resize((args.img_size, args.img_size)), # Applied to PIL image from dataset
+        transforms.ToTensor(), # Converts PIL ('L' or 'RGB') to Tensor (C, H, W)
+        data_normalize,
     ])
 
     # Dataset and DataLoader
@@ -133,7 +160,7 @@ def main():
             dataset_path=args.data_dir,
             participant_ids=vis_participant_ids,
             transform=vis_transform,
-            is_train=True,
+            is_train=False,
         )
     except Exception as e:
         print(f"Error initializing MPIIFaceGazeDataset: {e}")
@@ -203,7 +230,6 @@ def main():
         image_batch = image_tensor_resized.unsqueeze(0)
         with torch.no_grad():
             pred_landmarks_from_model_flat = model(image_batch).squeeze(0).cpu() # Shape (num_landmarks * 2)
-            print(f"Predicted landmarks: {pred_landmarks_from_model_flat}")
         
         pred_landmarks_from_model = pred_landmarks_from_model_flat.view(-1, 2) # Reshape to (num_landmarks, 2)
         
@@ -214,7 +240,7 @@ def main():
         pred_landmarks_for_plot = scaled_pred_landmarks.view(-1) # Flatten for plotting function
         
         # plot_image_and_landmarks expects landmarks in pixel coordinates of the displayed image
-        plot_image_and_landmarks(axes[i], image_tensor_resized.cpu(), true_landmarks_for_plot, pred_landmarks_for_plot, args.img_size)
+        plot_image_and_landmarks(axes[i], image_tensor_resized.cpu(), true_landmarks_for_plot, pred_landmarks_for_plot, CURRENT_MEAN, CURRENT_STD)
         axes[i].set_title(f"Sample {sample_idx} (Orig: {original_width}x{original_height})")
 
     # Add a single legend for the entire figure

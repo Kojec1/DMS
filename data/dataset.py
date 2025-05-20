@@ -2,10 +2,10 @@ from torch.utils.data import Dataset
 import os
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 import torchvision.transforms.functional as TF
 import random
-from .augmentation import crop_image, horizontal_flip, normalize_landmarks
+from .augmentation import horizontal_flip, normalize_landmarks, crop_to_content, apply_clahe, random_affine_with_landmarks
 
 class BaseDataset(Dataset):
     """Base PyTorch Dataset template. Custom datasets should inherit from this class."""
@@ -22,22 +22,17 @@ class BaseDataset(Dataset):
     
     
 class MPIIFaceGazeDataset(BaseDataset):
-    def __init__(self, dataset_path, participant_ids, transform=None, is_train=False, crop_to_face_bbox=True, train_crop_padding_range=(1.0, 2.0), test_crop_padding_factor=1.0, train_random_shift_fraction=0.2):
+    def __init__(self, dataset_path, participant_ids, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False):
         super().__init__(transform)
         self.dataset_path = dataset_path
         self.samples = []
         self.is_train = is_train
-        self.crop_to_face_bbox = crop_to_face_bbox
-        if not isinstance(train_crop_padding_range, tuple) or len(train_crop_padding_range) != 2:
-            raise ValueError("train_crop_padding_range must be a tuple of two floats (min, max).")
-        if not (isinstance(test_crop_padding_factor, float) or isinstance(test_crop_padding_factor, int)):
-            raise ValueError("test_crop_padding_factor must be a float or int.")
-        if not (isinstance(train_random_shift_fraction, float) or isinstance(train_random_shift_fraction, int)):
-            raise ValueError("train_random_shift_fraction must be a float or int.")
-
-        self.train_crop_padding_range = train_crop_padding_range
-        self.test_crop_padding_factor = float(test_crop_padding_factor)
-        self.train_random_shift_fraction = float(train_random_shift_fraction)
+        self.affine_aug = affine_aug
+        self.flip_aug = flip_aug
+        self.use_cache = use_cache
+        if self.use_cache:
+            self.image_cache = {}
+            print("Image caching enabled for MPIIFaceGazeDataset.")
         
         for p_id in participant_ids:
             participant_folder = os.path.join(self.dataset_path, f"p{p_id:02d}")
@@ -128,52 +123,53 @@ class MPIIFaceGazeDataset(BaseDataset):
     def __getitem__(self, index):
         sample = self.samples[index]
         image_path = sample['image_path']
-        # original_landmarks are in the coordinate system of the original, uncropped image
-        original_landmarks_np = sample['facial_landmarks'].copy() 
         
-        try:
-            image = Image.open(image_path).convert('RGB')
-            original_width, original_height = image.size
-        except FileNotFoundError:
-            print(f"Warning: File not found {image_path} for sample index {index}. Attempting to load next valid sample.")
-            if len(self.samples) == 0:
-                 raise RuntimeError("No samples available in the dataset.")
-            if len(self.samples) > 1: # Avoid infinite loop if only one sample and it's missing
-                 return self.__getitem__((index + 1) % len(self.samples)) # Try next, wrap around
-            else: # Only one sample and it's missing
-                 raise RuntimeError(f"Could not load the only image in the dataset: {image_path}")
+        # Make a fresh copy of landmarks from metadata each time, as they might be modified by augmentations
+        landmarks = sample['facial_landmarks'].copy()
 
-        current_image = image
-        current_landmarks_np = original_landmarks_np.copy()
-        effective_width, effective_height = original_width, original_height
+        image = None
 
-        # Face crop based on facial landmarks, apply padding and random shift (if training)
-        if self.crop_to_face_bbox:
-            current_image, current_landmarks_np, effective_width, effective_height = crop_image(
-                image,
-                original_landmarks_np,
-                self.is_train,
-                self.train_crop_padding_range,
-                self.test_crop_padding_factor,
-                self.train_random_shift_fraction
-            )
+        if self.use_cache and image_path in self.image_cache:
+            image, landmarks = self.image_cache[image_path]
+            landmarks = landmarks.copy() 
+        else:
+            image = Image.open(image_path).convert('L') # Load and convert to grayscale
 
-        # Image and Landmark Augmentation (if training)
-        if self.is_train and random.random() > 0.5: # 50% chance to flip
-            current_image, current_landmarks_np = horizontal_flip(current_image, current_landmarks_np, effective_width)
+            # Crop to non-black region (content crop)
+            image, landmarks = crop_to_content(image, landmarks, non_black_threshold=1)
+            
+            # Apply CLAHE 
+            image = apply_clahe(image) # Uses default clipLimit=2.0, tileGridSize=(8,8)
+
+            if self.use_cache:
+                self.image_cache[image_path] = (image.copy(), landmarks.copy())  # Store copies
+
+        if image is None:
+            raise RuntimeError(f"Image object is None for sample {index} ({image_path}).")
+         
+        effective_width, effective_height = image.size 
+
+        # Affine Augmentation (if training)
+        if self.is_train and self.affine_aug and random.random() > 0.5:
+            image, landmarks = random_affine_with_landmarks(image, landmarks)
+
+        # Horizontal Flip (if training)
+        if self.is_train and self.flip_aug and random.random() > 0.5:
+            image, landmarks = horizontal_flip(image, landmarks, effective_width)
 
         # Normalize landmarks to [0, 1]
-        current_landmarks_np = normalize_landmarks(current_landmarks_np, effective_width, effective_height)
+        landmarks = normalize_landmarks(landmarks, effective_width, effective_height)
 
+        # current_image is now a PIL Image in L mode (grayscale, equalized)
         item_to_return = {}
         if self.transform:
-            item_to_return['image'] = self.transform(current_image)
+            item_to_return['image'] = self.transform(image)
         else:
-            item_to_return['image'] = TF.to_tensor(current_image)
+            item_to_return['image'] = TF.to_tensor(image)
 
         # Convert numpy arrays to tensors
         item_to_return['gaze_screen_px'] = torch.from_numpy(sample['gaze_screen_px'])
-        item_to_return['facial_landmarks'] = torch.from_numpy(current_landmarks_np.astype(np.float32))
+        item_to_return['facial_landmarks'] = torch.from_numpy(landmarks.astype(np.float32))
         item_to_return['head_pose_rvec'] = torch.from_numpy(sample['head_pose_rvec'])
         item_to_return['head_pose_tvec'] = torch.from_numpy(sample['head_pose_tvec'])
         item_to_return['face_center_cam'] = torch.from_numpy(sample['face_center_cam'])

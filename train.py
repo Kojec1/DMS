@@ -35,6 +35,9 @@ def get_args():
     parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision')
     parser.add_argument('--resume_checkpoint', type=str, default=None, help='Path to checkpoint to resume training from')
     parser.add_argument('--no_pretrained_backbone', action='store_true', help='Do not use pretrained backbone weights')
+    parser.add_argument('--affine_aug', action='store_true', help='Use affine augmentation')
+    parser.add_argument('--flip_aug', action='store_true', help='Use flip augmentation')
+    parser.add_argument('--use_cache', action='store_true', help='Use cached images and landmarks')
     
     # Warmup arguments
     parser.add_argument('--warmup_epochs', type=int, default=0, help='Number of epochs for warmup phase.')
@@ -162,11 +165,15 @@ def main():
     train_dataset = MPIIFaceGazeDataset(dataset_path=args.data_dir, 
                                         participant_ids=train_ids, 
                                         transform=train_transform,
-                                        is_train=True)
+                                        is_train=True,
+                                        affine_aug=args.affine_aug,
+                                        flip_aug=args.flip_aug,
+                                        use_cache=args.use_cache)
     val_dataset = MPIIFaceGazeDataset(dataset_path=args.data_dir, 
                                       participant_ids=val_ids, 
                                       transform=val_transform,
-                                      is_train=False)
+                                      is_train=False,
+                                      use_cache=args.use_cache)
     
     if not train_dataset.samples:
         print(f"Error: No training samples found. Check data_dir ('{args.data_dir}') and train_participant_ids ('{args.train_participant_ids}').")
