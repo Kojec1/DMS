@@ -19,9 +19,9 @@ from utils.checkpoint import save_checkpoint, load_checkpoint
 def get_args():
     parser = argparse.ArgumentParser(description='Facial Landmark Estimation Training using MPIIFaceGazeDataset')
     parser.add_argument('--data_dir', type=str, required=True, help='Root directory for MPIIFaceGaze dataset (containing p00, p01, etc.)')
-    # num_landmarks is fixed by the dataset (6 landmarks, 2 coords each)
     parser.add_argument('--num_landmarks', type=int, default=6, help='Number of facial landmarks (MPIIFaceGaze has 6)')
     parser.add_argument('--img_size', type=int, default=224, help='Input image size (height and width) for ConvNeXt, e.g., 224')
+    parser.add_argument('--input_channels', type=int, default=3, choices=[1, 3], help='Number of input image channels (1 for grayscale, 3 for RGB)')
     parser.add_argument('--batch_size', type=int, default=32, help='Training batch size')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
@@ -118,18 +118,35 @@ def main():
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     # Image Transforms
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Standard ImageNet normalization
-    train_transform = transforms.Compose([
-        transforms.Resize((args.img_size, args.img_size)),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-        transforms.ToTensor(),
-        normalize,
-    ])
-    val_transform = transforms.Compose([
-        transforms.Resize((args.img_size, args.img_size)),
-        transforms.ToTensor(),
-        normalize,
-    ])
+    if args.input_channels == 1:
+        normalize = transforms.Normalize(mean=[0.449], std=[0.226]) # Grayscale normalization (adjust as needed)
+        train_transform_list = [
+            transforms.Resize((args.img_size, args.img_size)),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2), # Saturation/Hue removed for grayscale
+            transforms.ToTensor(),
+            normalize,
+        ]
+        val_transform_list = [
+            transforms.Resize((args.img_size, args.img_size)),
+            transforms.ToTensor(),
+            normalize,
+        ]
+    else: # Default to 3 channels (RGB)
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Standard ImageNet normalization
+        train_transform_list = [
+            transforms.Resize((args.img_size, args.img_size)),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            transforms.ToTensor(),
+            normalize,
+        ]
+        val_transform_list = [
+            transforms.Resize((args.img_size, args.img_size)),
+            transforms.ToTensor(),
+            normalize,
+        ]
+
+    train_transform = transforms.Compose(train_transform_list)
+    val_transform = transforms.Compose(val_transform_list)
 
     # DataLoaders
     try:
@@ -166,21 +183,22 @@ def main():
     # Model
     model = FacialLandmarkEstimator(
         num_landmarks=args.num_landmarks, 
-        pretrained_backbone=not args.no_pretrained_backbone
+        pretrained_backbone=not args.no_pretrained_backbone,
+        in_channels=args.input_channels  # Pass in_channels to the model
     ).to(device)
-    print(f"Model: FacialLandmarkEstimator initialized with {args.num_landmarks} landmarks.")
+    print(f"Model: FacialLandmarkEstimator initialized with {args.num_landmarks} landmarks and {args.input_channels} input channel(s).")
     print(f"Backbone pretrained: {not args.no_pretrained_backbone}")
 
     # Attempt to compile the model with torch.compile
-    if hasattr(torch, 'compile'):
-        try:
-            print("Attempting to compile the model with torch.compile()...")
-            model = torch.compile(model)
-            print("Model compiled successfully.")
-        except Exception as e:
-            print(f"Failed to compile model: {e}. Proceeding without compilation.")
-    else:
-        print("torch.compile not available. Proceeding without compilation (requires PyTorch 2.0+ for this feature).")
+    # if hasattr(torch, 'compile'):
+    #     try:
+    #         print("Attempting to compile the model with torch.compile()...")
+    #         model = torch.compile(model)
+    #         print("Model compiled successfully.")
+    #     except Exception as e:
+    #         print(f"Failed to compile model: {e}. Proceeding without compilation.")
+    # else:
+    #     print("torch.compile not available. Proceeding without compilation (requires PyTorch 2.0+ for this feature).")
 
     # Loss and Optimizer
     criterion = nn.MSELoss() # Mean Squared Error for landmark regression
