@@ -5,6 +5,7 @@ import torch
 from PIL import Image
 import torchvision.transforms.functional as TF
 import random
+from .augmentation import crop_image, horizontal_flip, normalize_landmarks
 
 class BaseDataset(Dataset):
     """Base PyTorch Dataset template. Custom datasets should inherit from this class."""
@@ -143,141 +144,26 @@ class MPIIFaceGazeDataset(BaseDataset):
                  raise RuntimeError(f"Could not load the only image in the dataset: {image_path}")
 
         current_image = image
-        # current_landmarks will be adjusted if cropping occurs
         current_landmarks_np = original_landmarks_np.copy()
         effective_width, effective_height = original_width, original_height
 
+        # Face crop based on facial landmarks, apply padding and random shift (if training)
         if self.crop_to_face_bbox:
-            padding_factor_to_use = 0.0
-            apply_random_shift = False
-
-            if self.is_train:
-                padding_factor_to_use = random.uniform(self.train_crop_padding_range[0], self.train_crop_padding_range[1])
-                if self.train_random_shift_fraction > 0.0:
-                    apply_random_shift = True
-            else: # is_test
-                padding_factor_to_use = self.test_crop_padding_factor
-
-            # Calculate bounding box from original landmarks
-            x_min_lm, y_min_lm = np.min(original_landmarks_np, axis=0)
-            x_max_lm, y_max_lm = np.max(original_landmarks_np, axis=0)
-
-            bbox_width = x_max_lm - x_min_lm
-            bbox_height = y_max_lm - y_min_lm
-            
-            # Ensure non-negative bbox dimensions for padding calculation
-            bbox_width = max(0, bbox_width)
-            bbox_height = max(0, bbox_height)
-
-            pad_w_half = (bbox_width * padding_factor_to_use) / 2.0
-            pad_h_half = (bbox_height * padding_factor_to_use) / 2.0
-
-            # Calculate initial floating point padded crop box (before shift)
-            f_padded_crop_x1 = x_min_lm - pad_w_half
-            f_padded_crop_y1 = y_min_lm - pad_h_half
-            f_padded_crop_x2 = x_max_lm + pad_w_half
-            f_padded_crop_y2 = y_max_lm + pad_h_half
-            
-            # Initialize final floating crop coordinates with the padded box
-            final_f_crop_x1, final_f_crop_y1 = f_padded_crop_x1, f_padded_crop_y1
-            final_f_crop_x2, final_f_crop_y2 = f_padded_crop_x2, f_padded_crop_y2
-
-            if apply_random_shift:
-                # Max shift to keep original landmark bbox inside the padded box
-                # dx_max_lm_constraint is pad_w_half, dx_min_lm_constraint is -pad_w_half
-                dx_min_lm_constraint = -pad_w_half 
-                dx_max_lm_constraint = pad_w_half
-                dy_min_lm_constraint = -pad_h_half
-                dy_max_lm_constraint = pad_h_half
-                
-                # Constraint from image boundaries for the shifted box:
-                # 0 <= f_padded_crop_x1 + dx  => dx >= -f_padded_crop_x1
-                # f_padded_crop_x2 + dx <= original_width => dx <= original_width - f_padded_crop_x2
-                dx_min_img_constraint = -f_padded_crop_x1
-                dx_max_img_constraint = original_width - f_padded_crop_x2
-                dy_min_img_constraint = -f_padded_crop_y1
-                dy_max_img_constraint = original_height - f_padded_crop_y2
-
-                # Combine landmark and image boundary constraints for dx
-                actual_dx_min = max(dx_min_lm_constraint, dx_min_img_constraint)
-                actual_dx_max = min(dx_max_lm_constraint, dx_max_img_constraint)
-                
-                # Combine landmark and image boundary constraints for dy
-                actual_dy_min = max(dy_min_lm_constraint, dy_min_img_constraint)
-                actual_dy_max = min(dy_max_lm_constraint, dy_max_img_constraint)
-
-                random_dx = 0.0
-                random_dy = 0.0
-
-                if actual_dx_max > actual_dx_min: # Check if a valid range for dx exists
-                    padded_box_width = f_padded_crop_x2 - f_padded_crop_x1
-                    # Avoid issues if padded_box_width is zero or very small
-                    if padded_box_width > 1e-6 : 
-                        max_abs_shift_x = self.train_random_shift_fraction * padded_box_width
-                        
-                        # Intersect with user-defined relative shift limit
-                        shift_limit_x_min = max(actual_dx_min, -max_abs_shift_x)
-                        shift_limit_x_max = min(actual_dx_max, max_abs_shift_x)
-
-                        if shift_limit_x_max > shift_limit_x_min:
-                             random_dx = random.uniform(shift_limit_x_min, shift_limit_x_max)
-                
-                if actual_dy_max > actual_dy_min: # Check if a valid range for dy exists
-                    padded_box_height = f_padded_crop_y2 - f_padded_crop_y1
-                    if padded_box_height > 1e-6:
-                        max_abs_shift_y = self.train_random_shift_fraction * padded_box_height
-
-                        # Intersect with user-defined relative shift limit
-                        shift_limit_y_min = max(actual_dy_min, -max_abs_shift_y)
-                        shift_limit_y_max = min(actual_dy_max, max_abs_shift_y)
-
-                        if shift_limit_y_max > shift_limit_y_min:
-                            random_dy = random.uniform(shift_limit_y_min, shift_limit_y_max)
-                
-                final_f_crop_x1 += random_dx
-                final_f_crop_y1 += random_dy
-                final_f_crop_x2 += random_dx
-                final_f_crop_y2 += random_dy
-            
-            # Convert to integer coordinates for cropping, clamping to original image boundaries
-            crop_x1_final = int(round(np.maximum(0, final_f_crop_x1)))
-            crop_y1_final = int(round(np.maximum(0, final_f_crop_y1)))
-            crop_x2_final = int(round(np.minimum(original_width, final_f_crop_x2)))
-            crop_y2_final = int(round(np.minimum(original_height, final_f_crop_y2)))
-
-            if crop_x1_final < crop_x2_final and crop_y1_final < crop_y2_final:
-                cropped_image_candidate = image.crop((crop_x1_final, crop_y1_final, crop_x2_final, crop_y2_final))
-                if cropped_image_candidate.width > 0 and cropped_image_candidate.height > 0:
-                    current_image = cropped_image_candidate
-                    effective_width, effective_height = current_image.size
-                    
-                    # Adjust landmarks to the new cropped image coordinate system
-                    current_landmarks_np[:, 0] -= crop_x1_final
-                    current_landmarks_np[:, 1] -= crop_y1_final
-                else:
-                    print(f"Warning: Crop for {image_path} resulted in zero dimension. Original image used. Box:({crop_x1_final},{crop_y1_final},{crop_x2_final},{crop_y2_final})")
-            else:
-                print(f"Warning: Invalid crop box calculated for {image_path}. Original image used. Box:({crop_x1_final},{crop_y1_final},{crop_x2_final},{crop_y2_final})")
+            current_image, current_landmarks_np, effective_width, effective_height = crop_image(
+                image,
+                original_landmarks_np,
+                self.is_train,
+                self.train_crop_padding_range,
+                self.test_crop_padding_factor,
+                self.train_random_shift_fraction
+            )
 
         # Image and Landmark Augmentation (if training)
         if self.is_train and random.random() > 0.5: # 50% chance to flip
-            current_image = TF.hflip(current_image)
-            # Adjust landmarks for flip, relative to the effective_width (which is cropped width if crop happened)
-            current_landmarks_np[:, 0] = effective_width - current_landmarks_np[:, 0]
+            current_image, current_landmarks_np = horizontal_flip(current_image, current_landmarks_np, effective_width)
 
-        # Normalize landmarks to [0, 1] using effective_width and effective_height
-        if effective_width > 0:
-            current_landmarks_np[:, 0] /= effective_width
-        else:
-            current_landmarks_np[:, 0] = 0.0 # Avoid division by zero; set to 0 if width is 0
-        
-        if effective_height > 0:
-            current_landmarks_np[:, 1] /= effective_height
-        else:
-            current_landmarks_np[:, 1] = 0.0 # Avoid division by zero; set to 0 if height is 0
-            
-        # Clip to ensure they are within [0,1] after division and potential flipping arithmetic
-        current_landmarks_np = np.clip(current_landmarks_np, 0.0, 1.0)
+        # Normalize landmarks to [0, 1]
+        current_landmarks_np = normalize_landmarks(current_landmarks_np, effective_width, effective_height)
 
         item_to_return = {}
         if self.transform:

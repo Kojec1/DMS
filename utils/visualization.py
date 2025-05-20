@@ -4,7 +4,7 @@ import os
 
 def plot_training_history(train_loss_history, val_loss_history, lr_history, save_path):
     """
-    Plots the training/validation loss and learning rate history, then saves it.
+    Plots the training/validation loss and learning rate history using subplots, then saves it.
 
     Args:
         train_loss_history (list): List of training losses for each epoch.
@@ -14,32 +14,34 @@ def plot_training_history(train_loss_history, val_loss_history, lr_history, save
     """
     epochs = range(1, len(train_loss_history) + 1)
 
-    fig, ax1 = plt.subplots(figsize=(12, 7))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True) # 2 rows, 1 column
 
-    # Plot Training and Validation Loss on ax1 (left y-axis)
-    color = 'tab:red'
-    ax1.set_xlabel('Epochs')
-    ax1.set_ylabel('Loss', color=color)
+    # Subplot 1: Training and Validation Loss
+    color_loss = 'tab:red'
+    ax1.set_ylabel('Loss', color=color_loss)
     ax1.plot(epochs, train_loss_history, 'bo-', label='Training Loss')
     ax1.plot(epochs, val_loss_history, 'ro-', label='Validation Loss')
-    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.tick_params(axis='y', labelcolor=color_loss)
     ax1.set_yscale('log') # Often useful for loss
-    ax1.legend(loc='upper left')
+    ax1.legend(loc='upper right')
     ax1.grid(True, linestyle='--')
+    ax1.set_title('Training and Validation Loss')
 
-    # Create a second y-axis (ax2) for the Learning Rate, sharing the same x-axis
-    ax2 = ax1.twinx()
-    color = 'tab:blue'
-    ax2.set_ylabel('Learning Rate', color=color)  # we already handled the x-label with ax1
+    # Subplot 2: Learning Rate
+    color_lr = 'tab:blue'
+    ax2.set_xlabel('Epochs')
+    ax2.set_ylabel('Learning Rate', color=color_lr)
     ax2.plot(epochs, lr_history, 'go-', label='Learning Rate')
-    ax2.tick_params(axis='y', labelcolor=color)
+    ax2.tick_params(axis='y', labelcolor=color_lr)
     ax2.set_yscale('log') # LR often changes over orders of magnitude
     ax2.legend(loc='upper right')
+    ax2.grid(True, linestyle='--')
+    ax2.set_title('Learning Rate')
 
     fig.suptitle('Training Metrics', fontsize=16)
-    fig.tight_layout()  # otherwise the right y-label is slightly clipped
-    # Adjust layout to make space for suptitle
-    plt.subplots_adjust(top=0.92)
+    fig.tight_layout()
+    # Adjust layout to make space for suptitle and prevent overlap
+    plt.subplots_adjust(top=0.90, hspace=0.3)
 
     # Ensure the directory exists
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
