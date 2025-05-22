@@ -23,5 +23,14 @@ def mobilenet_v2(pretrained: bool = False, **kwargs) -> nn.Module:
     feature_extractor = nn.Sequential(*list(model.children())[:-1])
     feature_extractor.add_module('adaptive_avg_pool2d', nn.AdaptiveAvgPool2d((1, 1)))
     feature_extractor.add_module('flatten', nn.Flatten(start_dim=1, end_dim=-1))
+    feature_extractor.out_features = 1280
     
     return feature_extractor 
+
+if __name__ == '__main__':
+    model = mobilenet_v2(pretrained=True)
+    print(model)
+
+    dummy_input = torch.randn(1, 3, 224, 224)
+    output = model(dummy_input)
+    print(output.shape)

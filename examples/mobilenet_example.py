@@ -5,7 +5,7 @@ import os
 # Add the project root directory to Python's path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nn.modules.bottleneck.mobilenet import mobilenet_v2
+from nn.modules.backbone.mobilenet import mobilenet_v2
 
 def example_usage():
     # Create a MobileNetV2 feature extractor

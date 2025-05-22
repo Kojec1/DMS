@@ -1,4 +1,4 @@
-from .bottleneck.convnext import convnext_tiny
+from .backbone.convnext import convnext_tiny
 from .head import HPHead
 from .DANet import DANet
 

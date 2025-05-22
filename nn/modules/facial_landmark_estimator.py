@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-from nn.modules.bottleneck.convnext import convnext_tiny
+from nn.modules.backbone.convnext import convnext_tiny
+from nn.modules.backbone.mobilenet import mobilenet_v2
 
 class FacialLandmarkEstimator(nn.Module):
     def __init__(self, num_landmarks: int = 6, pretrained_backbone: bool = True, in_channels: int = 3) -> None:
@@ -14,7 +15,8 @@ class FacialLandmarkEstimator(nn.Module):
         """
         super(FacialLandmarkEstimator, self).__init__()
         
-        self.backbone = convnext_tiny(pretrained=pretrained_backbone)
+        # self.backbone = convnext_tiny(pretrained=pretrained_backbone)
+        self.backbone = mobilenet_v2(pretrained=False)
         self.num_landmarks = num_landmarks
         self.in_channels = in_channels
         num_outputs = num_landmarks * 2  # Each landmark has (x, y) coordinates

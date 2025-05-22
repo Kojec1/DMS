@@ -5,7 +5,7 @@ import os
 # Add the project root directory to Python's path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nn.modules.bottleneck.convnext import convnext_tiny
+from nn.modules.backbone.convnext import convnext_tiny
 
 def example_usage():
     # Create a ConvNeXt Tiny feature extractor
