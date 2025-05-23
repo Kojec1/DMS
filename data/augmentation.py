@@ -130,3 +130,21 @@ def random_affine_with_landmarks(image, landmarks_np, degrees=(-20, 20), transla
     adjusted_landmarks[:, 1] = np.clip(adjusted_landmarks[:, 1], 0, original_height - 1)
 
     return transformed_image, adjusted_landmarks
+
+def landmarks_smoothing(landmarks_np, smoothing_factor=0.01, landmark_bounds=(0.0, 1.0)):
+    """
+    Applies label smoothing to normalized facial landmarks by adding small random noise.
+    """
+    if smoothing_factor <= 0:
+        return landmarks_np
+    
+    # Generate Gaussian noise with the same shape as landmarks
+    noise = np.random.normal(0, smoothing_factor, landmarks_np.shape).astype(np.float32)
+    
+    # Add noise to landmarks
+    smoothed_landmarks = landmarks_np + noise
+    
+    # Clip to ensure landmarks stay within valid bounds
+    smoothed_landmarks = np.clip(smoothed_landmarks, landmark_bounds[0], landmark_bounds[1])
+    
+    return smoothed_landmarks

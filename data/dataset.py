@@ -5,7 +5,7 @@ import torch
 from PIL import Image, ImageOps
 import torchvision.transforms.functional as TF
 import random
-from .augmentation import horizontal_flip, normalize_landmarks, crop_to_content, apply_clahe, random_affine_with_landmarks
+from .augmentation import horizontal_flip, normalize_landmarks, crop_to_content, apply_clahe, random_affine_with_landmarks, landmarks_smoothing
 
 class BaseDataset(Dataset):
     """Base PyTorch Dataset template. Custom datasets should inherit from this class."""
@@ -22,7 +22,7 @@ class BaseDataset(Dataset):
     
     
 class MPIIFaceGazeDataset(BaseDataset):
-    def __init__(self, dataset_path, participant_ids, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False):
+    def __init__(self, dataset_path, participant_ids, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0):
         super().__init__(transform)
         self.dataset_path = dataset_path
         self.samples = []
@@ -30,6 +30,8 @@ class MPIIFaceGazeDataset(BaseDataset):
         self.affine_aug = affine_aug
         self.flip_aug = flip_aug
         self.use_cache = use_cache
+        self.label_smoothing = label_smoothing 
+        
         if self.use_cache:
             self.image_cache = {}
             print("Image caching enabled for MPIIFaceGazeDataset.")
@@ -159,6 +161,10 @@ class MPIIFaceGazeDataset(BaseDataset):
 
         # Normalize landmarks to [0, 1]
         landmarks = normalize_landmarks(landmarks, effective_width, effective_height)
+
+        # Apply label smoothing to landmarks (if training and enabled)
+        if self.is_train and self.label_smoothing > 0:
+            landmarks = landmarks_smoothing(landmarks, smoothing_factor=self.label_smoothing)
 
         # current_image is now a PIL Image in L mode (grayscale, equalized)
         item_to_return = {}
