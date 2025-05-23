@@ -11,7 +11,7 @@ from tqdm import tqdm
 from nn.modules.facial_landmark_estimator import FacialLandmarkEstimator
 from data.dataset import MPIIFaceGazeDataset
 from utils.visualization import plot_training_history
-from utils.misc import set_seed
+from utils.misc import set_seed, setup_device
 from utils.checkpoint import save_checkpoint, load_checkpoint
 
 
@@ -31,7 +31,12 @@ def get_args():
     parser.add_argument('--checkpoint_freq', type=int, default=10, help='Frequency (in epochs) to save checkpoints. Best model is always saved.')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--log_interval', type=int, default=10, help='Interval for logging training status (batches)')
-    parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for DataLoader')
+    
+    # Optimized DataLoader settings for reduced CPU overhead
+    parser.add_argument('--num_workers', type=int, default=12, help='Number of workers for DataLoader')
+    parser.add_argument('--prefetch_factor', type=int, default=6, help='Number of batches to prefetch per worker')
+    parser.add_argument('--persistent_workers', action='store_true', default=True, help='Keep DataLoader workers alive between epochs')
+    
     parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision')
     parser.add_argument('--resume_checkpoint', type=str, default=None, help='Path to checkpoint to resume training from')
     parser.add_argument('--no_pretrained_backbone', action='store_true', help='Do not use pretrained backbone weights')
@@ -59,12 +64,12 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epo
     start_time = time.time()
 
     for batch_idx, batch_data in tqdm(enumerate(dataloader), total=len(dataloader), desc="Training"):
-        images = batch_data['image'].to(device)
+        images = batch_data['image'].to(device, non_blocking=True)
         # MPIIFaceGazeDataset returns landmarks as (N, 6, 2).
         # Model outputs (N, 12). Flatten targets.
-        targets = batch_data['facial_landmarks'].to(device).view(images.size(0), -1)
+        targets = batch_data['facial_landmarks'].to(device, non_blocking=True).view(images.size(0), -1)
         
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
         
         if args.amp:
             with torch.amp.autocast(device_type='cuda'):
@@ -96,8 +101,8 @@ def validate(model, dataloader, criterion, device, args):
     total_loss = 0.0
     with torch.no_grad():
         for batch_data in tqdm(dataloader, total=len(dataloader), desc="Validating"):
-            images = batch_data['image'].to(device)
-            targets = batch_data['facial_landmarks'].to(device).view(images.size(0), -1)
+            images = batch_data['image'].to(device, non_blocking=True)
+            targets = batch_data['facial_landmarks'].to(device, non_blocking=True).view(images.size(0), -1)
             
             # Use autocast consistently with enabled flag
             with torch.amp.autocast(device_type='cuda', enabled=args.amp):
@@ -118,6 +123,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    setup_device(device)
+    
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     # Image Transforms
@@ -182,10 +189,30 @@ def main():
         print(f"Error: No validation samples found. Check data_dir ('{args.data_dir}') and val_participant_ids ('{args.val_participant_ids}').")
         return
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, 
-                              num_workers=args.num_workers, pin_memory=True, drop_last=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, 
-                            num_workers=args.num_workers, pin_memory=True)
+    # Optimized DataLoader settings for reduced CPU overhead
+    persistent_workers = args.persistent_workers and args.num_workers > 0
+    
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=args.batch_size, 
+        shuffle=True, 
+        num_workers=args.num_workers, 
+        pin_memory=True, 
+        drop_last=True,
+        prefetch_factor=args.prefetch_factor, 
+        persistent_workers=persistent_workers
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=args.batch_size, 
+        shuffle=False, 
+        num_workers=args.num_workers, 
+        pin_memory=True,
+        prefetch_factor=args.prefetch_factor, 
+        persistent_workers=persistent_workers
+    )
+
+    print(f"DataLoader settings: num_workers={args.num_workers}, prefetch_factor={args.prefetch_factor}, persistent_workers={persistent_workers}")
 
     # Model
     model = FacialLandmarkEstimator(
