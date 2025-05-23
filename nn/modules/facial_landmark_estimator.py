@@ -3,7 +3,7 @@ import torch.nn as nn
 from nn.modules.bottleneck.convnext import convnext_tiny
 
 class FacialLandmarkEstimator(nn.Module):
-    def __init__(self, num_landmarks: int = 6, pretrained_backbone: bool = True, in_channels: int = 3) -> None:
+    def __init__(self, num_landmarks: int = 6, pretrained_backbone: bool = True, in_channels: int = 3, dropout_rate: float = 0.2) -> None:
         """
         Facial Landmark Estimation model using a ConvNeXt Tiny backbone.
 
@@ -46,6 +46,7 @@ class FacialLandmarkEstimator(nn.Module):
             # Replace the nn.Conv2d layer within the Conv2dNormActivation block
             self.backbone[0][0][0] = new_first_layer
 
+        self.dropout = nn.Dropout(dropout_rate)
         self.landmark_head = nn.Linear(self.backbone.out_features, num_outputs) # Access out_features from the actual features sequence
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -60,9 +61,11 @@ class FacialLandmarkEstimator(nn.Module):
         features = self.backbone(x)
         # Flatten the features before passing to the linear layer
         features_flattened = torch.flatten(features, 1) # Output shape (batch_size, out_features)
+        features_flattened = self.dropout(features_flattened)
         landmarks = self.landmark_head(features_flattened) # Pass features directly
 
         return landmarks
+
 
 if __name__ == '__main__':
     dummy_input = torch.randn(2, 1, 224, 224)

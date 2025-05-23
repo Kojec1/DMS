@@ -33,7 +33,6 @@ def plot_training_history(train_loss_history, val_loss_history, lr_history, save
     ax2.set_ylabel('Learning Rate', color=color_lr)
     ax2.plot(epochs, lr_history, 'go-', label='Learning Rate')
     ax2.tick_params(axis='y', labelcolor=color_lr)
-    ax2.set_yscale('log') # LR often changes over orders of magnitude
     ax2.legend(loc='upper right')
     ax2.grid(True, linestyle='--')
     ax2.set_title('Learning Rate')

@@ -39,11 +39,17 @@ def get_args():
     
     parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision')
     parser.add_argument('--resume_checkpoint', type=str, default=None, help='Path to checkpoint to resume training from')
+
+    # Model arguments
     parser.add_argument('--no_pretrained_backbone', action='store_true', help='Do not use pretrained backbone weights')
-    parser.add_argument('--affine_aug', action='store_true', help='Use affine augmentation')
-    parser.add_argument('--flip_aug', action='store_true', help='Use flip augmentation')
+    parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for the model')
+
+    # Augmentation arguments
+    parser.add_argument('--affine_aug', action='store_true', default=True, help='Use affine augmentation')
+    parser.add_argument('--flip_aug', action='store_true', default=True, help='Use flip augmentation')
+    parser.add_argument('--label_smoothing', type=float, default=0.01, help='Label smoothing for the dataset')
     parser.add_argument('--use_cache', action='store_true', help='Use cached images and landmarks')
-    
+
     # Warmup arguments
     parser.add_argument('--warmup_epochs', type=int, default=0, help='Number of epochs for warmup phase.')
     parser.add_argument('--warmup_lr', type=float, default=1e-3, help='Learning rate during warmup phase.')
@@ -56,6 +62,7 @@ def get_args():
                         help='Comma-separated list of participant IDs for validation')
 
     return parser.parse_args()
+
 
 # Training and Validation
 def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epoch, args):
@@ -175,7 +182,8 @@ def main():
                                         is_train=True,
                                         affine_aug=args.affine_aug,
                                         flip_aug=args.flip_aug,
-                                        use_cache=args.use_cache)
+                                        use_cache=args.use_cache,
+                                        label_smoothing=args.label_smoothing)
     val_dataset = MPIIFaceGazeDataset(dataset_path=args.data_dir, 
                                       participant_ids=val_ids, 
                                       transform=val_transform,
@@ -218,7 +226,8 @@ def main():
     model = FacialLandmarkEstimator(
         num_landmarks=args.num_landmarks, 
         pretrained_backbone=not args.no_pretrained_backbone,
-        in_channels=args.input_channels  # Pass in_channels to the model
+        in_channels=args.input_channels,
+        dropout_rate=args.dropout_rate
     ).to(device)
     print(f"Model: FacialLandmarkEstimator initialized with {args.num_landmarks} landmarks and {args.input_channels} input channel(s).")
     print(f"Backbone pretrained: {not args.no_pretrained_backbone}")
