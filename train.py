@@ -139,7 +139,8 @@ def main():
         normalize = transforms.Normalize(mean=[0.449], std=[0.226]) # Grayscale normalization (adjust as needed)
         train_transform_list = [
             transforms.Resize((args.img_size, args.img_size)),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2), # Saturation/Hue removed for grayscale
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
+            transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0)),
             transforms.ToTensor(),
             normalize,
         ]
@@ -153,6 +154,7 @@ def main():
         train_transform_list = [
             transforms.Resize((args.img_size, args.img_size)),
             transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0)),
             transforms.ToTensor(),
             normalize,
         ]
