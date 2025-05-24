@@ -56,7 +56,7 @@ def load_model_for_visualization(checkpoint_path, num_landmarks, device, in_chan
     else:
         model_state_dict = checkpoint
 
-    # model.load_state_dict(model_state_dict)
+    model.load_state_dict(model_state_dict)
     model.to(device)
     model.eval()
     print(f"Model loaded successfully with {in_channels} input channel(s).")

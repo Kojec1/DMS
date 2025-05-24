@@ -9,6 +9,8 @@ import time
 from tqdm import tqdm
 
 from nn.modules.facial_landmark_estimator import FacialLandmarkEstimator
+from nn.loss import SmoothWingLoss
+from nn.metrics import NME
 from data.dataset import MPIIFaceGazeDataset
 from utils.visualization import plot_training_history
 from utils.misc import set_seed, setup_device
@@ -68,62 +70,98 @@ def get_args():
 def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epoch, args):
     model.train()
     loss_accumulator = torch.tensor(0.0, device=device)
+    nme_accumulator = torch.tensor(0.0, device=device)
+    mse_accumulator = torch.tensor(0.0, device=device)
     start_time = time.time()
 
     for batch_idx, batch_data in tqdm(enumerate(dataloader), total=len(dataloader), desc="Training"):
         images = batch_data['image'].to(device, non_blocking=True)
-        # MPIIFaceGazeDataset returns landmarks as (N, 6, 2).
-        # Model outputs (N, 12). Flatten targets.
-        targets = batch_data['facial_landmarks'].to(device, non_blocking=True).view(images.size(0), -1)
+        gt_landmarks_flat = batch_data['facial_landmarks'].to(device, non_blocking=True).view(images.size(0), -1)
+        gt_landmarks_reshaped = batch_data['facial_landmarks'].to(device, non_blocking=True)
         
         optimizer.zero_grad(set_to_none=True)
         
         if args.amp:
             with torch.amp.autocast(device_type='cuda'):
-                outputs = model(images)
-                loss = criterion(outputs, targets)
+                outputs_flat = model(images) # Shape (N, num_landmarks * 2)
+                loss = criterion(outputs_flat, gt_landmarks_flat)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            outputs = model(images)
-            loss = criterion(outputs, targets)
+            outputs_flat = model(images) # Shape (N, num_landmarks * 2)
+            loss = criterion(outputs_flat, gt_landmarks_flat)
             loss.backward()
             optimizer.step()
         
         loss_accumulator += loss.detach()
 
+        # Calculate NME and MSE
+        outputs_reshaped = outputs_flat.detach().view(outputs_flat.size(0), -1, 2)
+        
+        # NME - outer eye corner landmarks have indices 0 and 3
+        current_nme = NME(outputs_reshaped, gt_landmarks_reshaped, left_eye_idx=0, right_eye_idx=3)
+        nme_accumulator += current_nme.detach()
+
+        # MSE
+        current_mse = torch.nn.functional.mse_loss(outputs_flat.detach(), gt_landmarks_flat)
+        mse_accumulator += current_mse.detach()
+
         # Log training progress
         if (batch_idx + 1) % args.log_interval == 0 or batch_idx == len(dataloader) -1:
             current_loss = loss.item()
             avg_epoch_loss = loss_accumulator.item() / (batch_idx + 1)
+            avg_epoch_nme = nme_accumulator.item() / (batch_idx + 1)
+            avg_epoch_mse = mse_accumulator.item() / (batch_idx + 1)
             elapsed_time = time.time() - start_time
-            print(f'Epoch [{epoch+1}/{args.epochs}], Step [{batch_idx+1}/{len(dataloader)}], ' \
-                  f'Loss: {current_loss:.6f} (Avg Epoch: {avg_epoch_loss:.6f}), Time: {elapsed_time:.2f}s')
+            print(f'Epoch [{epoch+1}/{args.epochs}], Step [{batch_idx+1}/{len(dataloader)}], '
+                  f'Loss: {current_loss:.6f} (Avg Epoch: {avg_epoch_loss:.6f}), '
+                  f'NME: {current_nme.item():.6f} (Avg Epoch: {avg_epoch_nme:.6f}), '
+                  f'MSE: {current_mse.item():.6f} (Avg Epoch: {avg_epoch_mse:.6f}), Time: {elapsed_time:.2f}s')
             start_time = time.time() # Reset timer for next log interval reporting
             
-    return (loss_accumulator / len(dataloader)).item()
+    avg_loss = (loss_accumulator / len(dataloader)).item()
+    avg_nme = (nme_accumulator / len(dataloader)).item()
+    avg_mse = (mse_accumulator / len(dataloader)).item()
+
+    return avg_loss, avg_nme, avg_mse
 
 def validate(model, dataloader, criterion, device, args):
     model.eval()
     loss_accumulator = torch.tensor(0.0, device=device)
+    nme_accumulator = torch.tensor(0.0, device=device)
+    mse_accumulator = torch.tensor(0.0, device=device)
 
     with torch.no_grad():
         for batch_data in tqdm(dataloader, total=len(dataloader), desc="Validating"):
             images = batch_data['image'].to(device, non_blocking=True)
-            targets = batch_data['facial_landmarks'].to(device, non_blocking=True).view(images.size(0), -1)
+            gt_landmarks_flat = batch_data['facial_landmarks'].to(device, non_blocking=True).view(images.size(0), -1)
+            gt_landmarks_reshaped = batch_data['facial_landmarks'].to(device, non_blocking=True)
             
             # Use autocast consistently with enabled flag
             with torch.amp.autocast(device_type='cuda', enabled=args.amp):
-                outputs = model(images)
-                loss = criterion(outputs, targets)
+                outputs_flat = model(images)
+                loss = criterion(outputs_flat, gt_landmarks_flat)
                 
             loss_accumulator += loss.detach()
+
+            # Calculate NME and MSE
+            outputs_reshaped = outputs_flat.detach().view(outputs_flat.size(0), -1, 2)
+            
+            # NME - outer eye corner landmarks have indices 0 and 3
+            current_nme = NME(outputs_reshaped, gt_landmarks_reshaped, left_eye_idx=0, right_eye_idx=3)
+            nme_accumulator += current_nme.detach()
+
+            # MSE
+            current_mse = torch.nn.functional.mse_loss(outputs_flat.detach(), gt_landmarks_flat)
+            mse_accumulator += current_mse.detach()
             
     avg_loss = (loss_accumulator / len(dataloader)).item()
-    print(f'Validation: Avg Loss: {avg_loss:.6f}\n')
+    avg_nme = (nme_accumulator / len(dataloader)).item()
+    avg_mse = (mse_accumulator / len(dataloader)).item()
+    print(f'Validation: Avg Loss: {avg_loss:.6f}, Avg NME: {avg_nme:.6f}, Avg MSE: {avg_mse:.6f}\n')
 
-    return (loss_accumulator / len(dataloader)).item()
+    return avg_loss, avg_nme, avg_mse
 
 # Main Function
 def main():
@@ -249,7 +287,7 @@ def main():
     #     print("torch.compile not available. Proceeding without compilation (requires PyTorch 2.0+ for this feature).")
 
     # Loss and Optimizer
-    criterion = nn.MSELoss() # Mean Squared Error for landmark regression
+    criterion = SmoothWingLoss() # Smooth Wing Loss for landmark regression
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
     # Learning Rate Scheduler - will be initialized considering warmup
@@ -287,6 +325,10 @@ def main():
     best_val_loss = float('inf')
     train_loss_history = []
     val_loss_history = []
+    train_nme_history = []
+    val_nme_history = []
+    train_mse_history = []
+    val_mse_history = []
     lr_history = []
     print(f"Starting training for {args.epochs} total epochs. Warmup epochs: {args.warmup_epochs}.")
 
@@ -330,8 +372,8 @@ def main():
                 print(f"Main Training (Epoch {epoch+1-args.warmup_epochs}/{main_training_epochs}). LR reset to: {args.lr:.2e} for scheduler.")
         lr_history.append(optimizer.param_groups[0]['lr']) # Record LR for the epoch
 
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, scaler, device, epoch, args)
-        val_loss = validate(model, val_loader, criterion, device, args)
+        train_loss, train_nme, train_mse = train_one_epoch(model, train_loader, criterion, optimizer, scaler, device, epoch, args)
+        val_loss, val_nme, val_mse = validate(model, val_loader, criterion, device, args)
         
         # Step the scheduler if in main training phase (and scheduler exists)
         if not is_warmup_epoch and scheduler is not None:
@@ -341,9 +383,12 @@ def main():
         elif not is_warmup_epoch: # Main training but no scheduler (e.g. main_training_epochs <=0)
              print(f"Main Training (Epoch {epoch + 1 - args.warmup_epochs}/{main_training_epochs}). No scheduler. LR: {optimizer.param_groups[0]['lr']:.2e}")
 
-
         train_loss_history.append(train_loss)
         val_loss_history.append(val_loss)
+        train_nme_history.append(train_nme)
+        val_nme_history.append(val_nme)
+        train_mse_history.append(train_mse)
+        val_mse_history.append(val_mse)
         
         # Save checkpoint based on frequency or if it's the last epoch
         if (epoch + 1) % args.checkpoint_freq == 0 or (epoch + 1) == args.epochs:
@@ -358,7 +403,7 @@ def main():
             save_checkpoint(epoch, model, optimizer, scheduler, scaler if args.amp else None, best_checkpoint_path)
             print(f"New best validation loss: {best_val_loss:.6f}. Saved best model to {best_checkpoint_path}")
         
-        print(f"Epoch {epoch+1} Summary: Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
+        print(f"Epoch {epoch+1} Summary: Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, Train NME: {train_nme:.6f}, Val NME: {val_nme:.6f}, Train MSE: {train_mse:.6f}, Val MSE: {val_mse:.6f}")
 
     print("Training finished.")
     print(f"Best validation loss: {best_val_loss:.6f}")
@@ -366,7 +411,10 @@ def main():
 
     # Plot training history
     plot_path = os.path.join(args.checkpoint_dir, 'training_history.png')
-    plot_training_history(train_loss_history, val_loss_history, lr_history, plot_path)
+    plot_training_history(train_loss_history, val_loss_history, 
+                          train_nme_history, val_nme_history,
+                          train_mse_history, val_mse_history,
+                          lr_history, plot_path)
     print(f"Training history plot saved to {plot_path}")
 
 if __name__ == '__main__':
