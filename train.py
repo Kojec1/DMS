@@ -93,9 +93,6 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epo
         
         loss_accumulator += loss.detach()
 
-        # Clean up intermediate tensors
-        del outputs, loss
-        
         # Log training progress
         if (batch_idx + 1) % args.log_interval == 0 or batch_idx == len(dataloader) -1:
             current_loss = loss.item()
@@ -122,9 +119,6 @@ def validate(model, dataloader, criterion, device, args):
                 loss = criterion(outputs, targets)
                 
             loss_accumulator += loss.detach()
-
-            # Clean up intermediate tensors
-            del outputs, loss
             
     avg_loss = (loss_accumulator / len(dataloader)).item()
     print(f'Validation: Avg Loss: {avg_loss:.6f}\n')
