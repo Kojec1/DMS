@@ -35,7 +35,7 @@ def get_args():
     # Optimized DataLoader settings for reduced CPU overhead
     parser.add_argument('--num_workers', type=int, default=12, help='Number of workers for DataLoader')
     parser.add_argument('--prefetch_factor', type=int, default=6, help='Number of batches to prefetch per worker')
-    parser.add_argument('--persistent_workers', action='store_true', default=True, help='Keep DataLoader workers alive between epochs')
+    parser.add_argument('--persistent_workers', action='store_true', help='Keep DataLoader workers alive between epochs')
     
     parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision')
     parser.add_argument('--resume_checkpoint', type=str, default=None, help='Path to checkpoint to resume training from')
@@ -45,8 +45,8 @@ def get_args():
     parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for the model')
 
     # Augmentation arguments
-    parser.add_argument('--affine_aug', action='store_true', default=True, help='Use affine augmentation')
-    parser.add_argument('--flip_aug', action='store_true', default=True, help='Use flip augmentation')
+    parser.add_argument('--affine_aug', action='store_true', help='Use affine augmentation')
+    parser.add_argument('--flip_aug', action='store_true', help='Use flip augmentation')
     parser.add_argument('--label_smoothing', type=float, default=0.01, help='Label smoothing for the dataset')
     parser.add_argument('--use_cache', action='store_true', help='Use cached images and landmarks')
 
@@ -67,7 +67,7 @@ def get_args():
 # Training and Validation
 def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epoch, args):
     model.train()
-    total_loss = 0.0
+    loss_accumulator = torch.tensor(0.0, device=device)
     start_time = time.time()
 
     for batch_idx, batch_data in tqdm(enumerate(dataloader), total=len(dataloader), desc="Training"):
@@ -76,7 +76,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epo
         # Model outputs (N, 12). Flatten targets.
         targets = batch_data['facial_landmarks'].to(device, non_blocking=True).view(images.size(0), -1)
         
-        optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         
         if args.amp:
             with torch.amp.autocast(device_type='cuda'):
@@ -91,21 +91,26 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epo
             loss.backward()
             optimizer.step()
         
-        total_loss += loss.item()
+        loss_accumulator += loss.detach()
+
+        # Clean up intermediate tensors
+        del outputs, loss
         
+        # Log training progress
         if (batch_idx + 1) % args.log_interval == 0 or batch_idx == len(dataloader) -1:
             current_loss = loss.item()
-            avg_epoch_loss = total_loss / (batch_idx + 1)
+            avg_epoch_loss = loss_accumulator.item() / (batch_idx + 1)
             elapsed_time = time.time() - start_time
             print(f'Epoch [{epoch+1}/{args.epochs}], Step [{batch_idx+1}/{len(dataloader)}], ' \
                   f'Loss: {current_loss:.6f} (Avg Epoch: {avg_epoch_loss:.6f}), Time: {elapsed_time:.2f}s')
             start_time = time.time() # Reset timer for next log interval reporting
             
-    return total_loss / len(dataloader)
+    return (loss_accumulator / len(dataloader)).item()
 
 def validate(model, dataloader, criterion, device, args):
     model.eval()
-    total_loss = 0.0
+    loss_accumulator = torch.tensor(0.0, device=device)
+
     with torch.no_grad():
         for batch_data in tqdm(dataloader, total=len(dataloader), desc="Validating"):
             images = batch_data['image'].to(device, non_blocking=True)
@@ -116,11 +121,15 @@ def validate(model, dataloader, criterion, device, args):
                 outputs = model(images)
                 loss = criterion(outputs, targets)
                 
-            total_loss += loss.item()
+            loss_accumulator += loss.detach()
+
+            # Clean up intermediate tensors
+            del outputs, loss
             
-    avg_loss = total_loss / len(dataloader)
+    avg_loss = (loss_accumulator / len(dataloader)).item()
     print(f'Validation: Avg Loss: {avg_loss:.6f}\n')
-    return avg_loss
+
+    return (loss_accumulator / len(dataloader)).item()
 
 # Main Function
 def main():
