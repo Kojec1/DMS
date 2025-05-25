@@ -14,7 +14,7 @@ from nn.metrics import NME
 from data.dataset import MPIIFaceGazeDataset
 from utils.visualization import plot_training_history
 from utils.misc import set_seed, setup_device
-from utils.checkpoint import save_checkpoint, load_checkpoint
+from utils.checkpoint import save_checkpoint, load_checkpoint, save_history, load_history
 
 
 # Configuration
@@ -312,24 +312,37 @@ def main():
 
     # Resume from Checkpoint
     start_epoch = 0
+    history = {
+        'train_loss': [],
+        'val_loss': [],
+        'train_nme': [],
+        'val_nme': [],
+        'train_mse': [],
+        'val_mse': [],
+        'lr': []
+    }
+    history_filepath = os.path.join(args.checkpoint_dir, 'training_history.json')
+
     if args.resume_checkpoint:
         if os.path.isfile(args.resume_checkpoint):
             # Pass scheduler to load_checkpoint (it might be None if no main_training_epochs)
             print(f"Resuming training from checkpoint: {args.resume_checkpoint}")
             start_epoch = load_checkpoint(args.resume_checkpoint, model, optimizer, scheduler, scaler if args.amp else None)
             print(f"Resumed from epoch {start_epoch}. Optimizer LR: {optimizer.param_groups[0]['lr']:.2e}")
+            
+            # Load history if resuming
+            loaded_history = load_history(history_filepath)
+            if loaded_history:
+                history = loaded_history
+                print("Resumed training history.")
+            else:
+                print("No existing history file found or error loading it. Starting with fresh history.")
         else:
             print(f"Warning: Resume checkpoint not found at {args.resume_checkpoint}")
 
     # Training Loop
     best_val_loss = float('inf')
-    train_loss_history = []
-    val_loss_history = []
-    train_nme_history = []
-    val_nme_history = []
-    train_mse_history = []
-    val_mse_history = []
-    lr_history = []
+
     print(f"Starting training for {args.epochs} total epochs. Warmup epochs: {args.warmup_epochs}.")
 
     for epoch in range(start_epoch, args.epochs):
@@ -370,7 +383,8 @@ def main():
                 for g in optimizer.param_groups:
                     g['lr'] = args.lr
                 print(f"Main Training (Epoch {epoch+1-args.warmup_epochs}/{main_training_epochs}). LR reset to: {args.lr:.2e} for scheduler.")
-        lr_history.append(optimizer.param_groups[0]['lr']) # Record LR for the epoch
+        
+        history['lr'].append(optimizer.param_groups[0]['lr'])  # Record LR for the epoch
 
         train_loss, train_nme, train_mse = train_one_epoch(model, train_loader, criterion, optimizer, scaler, device, epoch, args)
         val_loss, val_nme, val_mse = validate(model, val_loader, criterion, device, args)
@@ -383,24 +397,26 @@ def main():
         elif not is_warmup_epoch: # Main training but no scheduler (e.g. main_training_epochs <=0)
              print(f"Main Training (Epoch {epoch + 1 - args.warmup_epochs}/{main_training_epochs}). No scheduler. LR: {optimizer.param_groups[0]['lr']:.2e}")
 
-        train_loss_history.append(train_loss)
-        val_loss_history.append(val_loss)
-        train_nme_history.append(train_nme)
-        val_nme_history.append(val_nme)
-        train_mse_history.append(train_mse)
-        val_mse_history.append(val_mse)
+        history['train_loss'].append(train_loss)
+        history['val_loss'].append(val_loss)
+        history['train_nme'].append(train_nme)
+        history['val_nme'].append(val_nme)
+        history['train_mse'].append(train_mse)
+        history['val_mse'].append(val_mse)
         
         # Save checkpoint based on frequency or if it's the last epoch
         if (epoch + 1) % args.checkpoint_freq == 0 or (epoch + 1) == args.epochs:
             checkpoint_path = os.path.join(args.checkpoint_dir, f'epoch_{epoch+1}.pth')
             # Pass scheduler to save_checkpoint
             save_checkpoint(epoch, model, optimizer, scheduler, scaler if args.amp else None, checkpoint_path)
+            save_history(history, history_filepath)
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_checkpoint_path = os.path.join(args.checkpoint_dir, 'best_model.pth')
             # Pass scheduler to save_checkpoint
             save_checkpoint(epoch, model, optimizer, scheduler, scaler if args.amp else None, best_checkpoint_path)
+            save_history(history, history_filepath)
             print(f"New best validation loss: {best_val_loss:.6f}. Saved best model to {best_checkpoint_path}")
         
         print(f"Epoch {epoch+1} Summary: Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, Train NME: {train_nme:.6f}, Val NME: {val_nme:.6f}, Train MSE: {train_mse:.6f}, Val MSE: {val_mse:.6f}")
@@ -409,13 +425,18 @@ def main():
     print(f"Best validation loss: {best_val_loss:.6f}")
     print(f"Find the best model at: {os.path.join(args.checkpoint_dir, 'best_model.pth')}")
 
+    # Save final history at the end of training
+    save_history(history, history_filepath)
+    print(f"Final training history saved to {history_filepath}")
+
     # Plot training history
     plot_path = os.path.join(args.checkpoint_dir, 'training_history.png')
-    plot_training_history(train_loss_history, val_loss_history, 
-                          train_nme_history, val_nme_history,
-                          train_mse_history, val_mse_history,
-                          lr_history, plot_path)
+    plot_training_history(history['train_loss'], history['val_loss'], 
+                          history['train_nme'], history['val_nme'],
+                          history['train_mse'], history['val_mse'],
+                          history['lr'], plot_path)
     print(f"Training history plot saved to {plot_path}")
+
 
 if __name__ == '__main__':
     main()

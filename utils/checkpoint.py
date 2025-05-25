@@ -1,12 +1,13 @@
 import torch
 import os
+import json
 
 
 def save_checkpoint(epoch, model, optimizer, scheduler, scaler, filepath):
     """
     Saves a checkpoint of the model, optimizer, scheduler, and scaler.
     """
-    print(f"=> Saving checkpoint to {filepath}")
+    print(f"Saving checkpoint to {filepath}")
     state = {
         'epoch': epoch,
         'optimizer_state_dict': optimizer.state_dict(),
@@ -26,7 +27,7 @@ def load_checkpoint(filepath, model, optimizer, scheduler, scaler):
     Loads a checkpoint of the model, optimizer, scheduler, and scaler.
     """
     if os.path.isfile(filepath):
-        print(f"=> Loading checkpoint '{filepath}'")
+        print(f"Loading checkpoint '{filepath}'")
         checkpoint = torch.load(filepath)
         start_epoch = checkpoint['epoch'] + 1
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -35,8 +36,32 @@ def load_checkpoint(filepath, model, optimizer, scheduler, scaler):
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         if scaler is not None and 'scaler_state_dict' in checkpoint:
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
-        print(f"=> Loaded checkpoint '{filepath}' (epoch {checkpoint['epoch']})")
+        print(f"Loaded checkpoint '{filepath}' (epoch {checkpoint['epoch']})")
         return start_epoch
     else:
-        print(f"=> No checkpoint found at '{filepath}'")
+        print(f"No checkpoint found at '{filepath}'")  
         return 0
+
+def save_history(history, filepath):
+    """
+    Saves the history dictionary to a file using torch.save.
+    """
+    print(f"Saving training history to {filepath}")
+    with open(filepath, 'w') as f:
+        json.dump(history, f, indent=4)
+
+def load_history(filepath):
+    """
+    Loads the history dictionary from a file using torch.load.
+    """
+    if os.path.isfile(filepath):
+        try:
+            print(f"Loading training history from {filepath}")
+            with open(filepath, 'r') as f:
+                history = json.load(f)
+            return history
+        except Exception as e:
+            print(f"Error loading history file {filepath}: {e}")
+            return None
+    return None
+
