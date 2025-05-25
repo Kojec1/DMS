@@ -22,6 +22,15 @@ class BaseDataset(Dataset):
     
     
 class MPIIFaceGazeDataset(BaseDataset):
+    """
+    Landmarks:
+    - 0: Left outer eye
+    - 1: Left inner eye
+    - 2: Right inner eye
+    - 3: Right outer eye
+    - 4: Left mouth
+    - 5: Right mouth
+    """
     def __init__(self, dataset_path, participant_ids, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0):
         super().__init__(transform)
         self.dataset_path = dataset_path
@@ -158,6 +167,10 @@ class MPIIFaceGazeDataset(BaseDataset):
         # Horizontal Flip (if training)
         if self.is_train and self.flip_aug and random.random() > 0.5:
             image, landmarks = horizontal_flip(image, landmarks, effective_width)
+            # Swap landmark indices after horizontal flip
+            # Original: 0:L_outer, 1:L_inner, 2:R_inner, 3:R_outer, 4:L_mouth, 5:R_mouth
+            # Flipped:  0:R_outer, 1:R_inner, 2:L_inner, 3:L_outer, 4:R_mouth, 5:L_mouth
+            landmarks = landmarks[[3, 2, 1, 0, 5, 4], :]
 
         # Normalize landmarks to [0, 1]
         landmarks = normalize_landmarks(landmarks, effective_width, effective_height)
