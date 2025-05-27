@@ -10,10 +10,7 @@ from PIL import Image
 from nn.modules.facial_landmark_estimator import FacialLandmarkEstimator
 from data.dataset import MPIIFaceGazeDataset
 from utils.misc import set_seed
-
-# ImageNet mean and std for unnormalization
-MEAN = torch.tensor([0.485, 0.456, 0.406])
-STD = torch.tensor([0.229, 0.224, 0.225])
+from nn.metrics.landmark_metrics import NME
 
 
 def get_args():
@@ -30,21 +27,29 @@ def get_args():
                         help='Number of facial landmarks (MPIIFaceGaze has 6)')
     parser.add_argument('--img_size', type=int, default=224, 
                         help='Input image size used during training (e.g., 224)')
+    parser.add_argument('--input_channels', type=int, default=1, choices=[1, 3],
+                        help='Number of input image channels model was trained with (1 for grayscale, 3 for RGB)')
     parser.add_argument('--seed', type=int, default=42, 
                         help='Random seed for reproducibility of sample selection')
     parser.add_argument('--no_cuda', action='store_true', help='Disable CUDA even if available')
+    parser.add_argument('--display_mode', type=str, default="all", choices=["all", "correct", "incorrect"],
+                        help='Which samples to display based on NME: all, correct, or incorrect')
+    parser.add_argument('--nme_threshold', type=float, default=0.1, 
+                        help='Threshold for NME to be considered as correct (0.1 is default for MPIIFaceGaze)')
+    parser.add_argument('--left_eye_idx', type=int, default=0,
+                        help='0-indexed of the left eye landmark for NME calculation')
+    parser.add_argument('--right_eye_idx', type=int, default=3,
+                        help='0-indexed of the right eye landmark for NME calculation')
     
     return parser.parse_args()
 
-def unnormalize_image(tensor):
-    """Unnormalize a tensor image with ImageNet mean and std."""
-    tensor = tensor.clone()
-    for t, m, s in zip(tensor, MEAN, STD):
-        t.mul_(s).add_(m)
-    return tensor
 
-def load_model_for_visualization(checkpoint_path, num_landmarks, device):
-    model = FacialLandmarkEstimator(num_landmarks=num_landmarks, pretrained_backbone=False)
+def load_model_for_visualization(checkpoint_path, num_landmarks, device, in_channels): # Added in_channels
+    model = FacialLandmarkEstimator(
+        num_landmarks=num_landmarks, 
+        pretrained_backbone=False, # Set to False, as we are loading a trained model's weights
+        in_channels=in_channels     # Pass in_channels
+    )
     if not os.path.isfile(checkpoint_path):
         print(f"Error: Checkpoint file not found at {checkpoint_path}")
         return None
@@ -62,19 +67,39 @@ def load_model_for_visualization(checkpoint_path, num_landmarks, device):
     model.load_state_dict(model_state_dict)
     model.to(device)
     model.eval()
-    print("Model loaded successfully.")
+    print(f"Model loaded successfully with {in_channels} input channel(s).")
     return model
 
-def plot_image_and_landmarks(ax, image_tensor, true_landmarks, pred_landmarks, img_size):
+def plot_image_and_landmarks(ax, image_tensor_cpu, true_landmarks, pred_landmarks, current_mean, current_std):
     """Plots the image with true and predicted landmarks."""
-    # Unnormalize and prepare image for display
-    img_display = unnormalize_image(image_tensor.cpu())
-    img_display = img_display.numpy().transpose(1, 2, 0) # C, H, W -> H, W, C
-    img_display = np.clip(img_display, 0, 1) # Ensure values are in [0,1] for display
+    # Unnormalize the image tensor
+    img_unnormalized = image_tensor_cpu.clone()
+    # Ensure current_mean and current_std are tensors for consistent indexing
+    if not isinstance(current_mean, torch.Tensor): current_mean = torch.tensor(current_mean)
+    if not isinstance(current_std, torch.Tensor): current_std = torch.tensor(current_std)
 
-    ax.imshow(img_display)
+    for c_idx in range(img_unnormalized.size(0)):
+        img_unnormalized[c_idx].mul_(current_std[c_idx]).add_(current_mean[c_idx])
     
-    # Reshape to (num_landmarks, 2) for plotting
+    img_display_np = img_unnormalized.cpu().numpy()
+
+    # Prepare for display (handle C,H,W to H,W,C or H,W)
+    if img_display_np.shape[0] == 1:  # Grayscale (1, H, W)
+        img_display_np = img_display_np.squeeze(0)  # -> (H, W)
+    elif img_display_np.shape[0] == 3:  # RGB (3, H, W)
+        img_display_np = img_display_np.transpose(1, 2, 0)  # -> (H, W, 3)
+    else: # Should not happen with 1 or 3 channels
+        print(f"Warning: Unexpected image tensor shape for display: {img_display_np.shape}")
+
+    img_display_np = np.clip(img_display_np, 0, 1) # Ensure values are in [0,1] for display
+
+    # Display image
+    if img_display_np.ndim == 2 or (img_display_np.ndim == 3 and img_display_np.shape[-1] == 1):
+        ax.imshow(img_display_np, cmap='gray', vmin=0, vmax=1)
+    else:
+        ax.imshow(img_display_np, vmin=0, vmax=1) # For RGB
+    
+    # Reshape landmarks (already scaled to img_size) for plotting
     true_lmks = true_landmarks.cpu().numpy().reshape(-1, 2)
     pred_lmks = pred_landmarks.cpu().numpy().reshape(-1, 2)
 
@@ -85,33 +110,43 @@ def plot_image_and_landmarks(ax, image_tensor, true_landmarks, pred_landmarks, i
 
 def main():
     args = get_args()
-    set_seed(args.seed)
+    # set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     print(f"Using device: {device}")
 
+    # Define MEAN and STD for normalization/unnormalization based on input_channels
+    if args.input_channels == 1:
+        CURRENT_MEAN = [0.449] # Mean for grayscale, as per train.py
+        CURRENT_STD = [0.226]   # Std for grayscale, as per train.py
+        print("Using 1-channel (grayscale) normalization.")
+    else: # Default to 3 channels (RGB)
+        CURRENT_MEAN = [0.485, 0.456, 0.406] # Standard ImageNet mean
+        CURRENT_STD = [0.229, 0.224, 0.225]  # Standard ImageNet std
+        print("Using 3-channel (RGB) normalization.")
+
     # Parse grid size
     try:
-        rows, cols = map(int, args.grid_size.split('x'))
-        if rows <= 0 or cols <= 0:
+        original_rows, original_cols = map(int, args.grid_size.split('x'))
+        if original_rows <= 0 or original_cols <= 0:
             raise ValueError("Grid dimensions must be positive.")
     except ValueError as e:
         print(f"Error: Invalid grid_size format '{args.grid_size}'. Expected 'rowsxcols', e.g., '2x3'. {e}")
         return
     
-    num_samples_to_display = rows * cols
+    target_num_samples_to_display = original_rows * original_cols
 
     # Load Model
-    model = load_model_for_visualization(args.checkpoint_path, args.num_landmarks, device)
+    model = load_model_for_visualization(args.checkpoint_path, args.num_landmarks, device, args.input_channels)
     if model is None:
         return
 
     # Data Transformations
-    normalize = transforms.Normalize(mean=MEAN, std=STD)
+    data_normalize = transforms.Normalize(mean=CURRENT_MEAN, std=CURRENT_STD)
     vis_transform = transforms.Compose([
-        transforms.Resize((args.img_size, args.img_size)),
-        transforms.ToTensor(),
-        normalize,
+        transforms.Resize((args.img_size, args.img_size)), # Applied to PIL image from dataset
+        transforms.ToTensor(), # Converts PIL ('L' or 'RGB') to Tensor (C, H, W)
+        data_normalize,
     ])
 
     # Dataset and DataLoader
@@ -132,7 +167,8 @@ def main():
         full_dataset = MPIIFaceGazeDataset(
             dataset_path=args.data_dir,
             participant_ids=vis_participant_ids,
-            transform=vis_transform
+            transform=vis_transform,
+            is_train=False,
         )
     except Exception as e:
         print(f"Error initializing MPIIFaceGazeDataset: {e}")
@@ -146,84 +182,163 @@ def main():
     
     print(f"Loaded {len(full_dataset)} samples from {len(vis_participant_ids)} participant(s).")
 
-    # Select random samples
-    if len(full_dataset) < num_samples_to_display:
-        print(f"Warning: Requested {num_samples_to_display} samples, but dataset only has {len(full_dataset)}. Displaying all available.")
-        num_samples_to_display = len(full_dataset)
-        # Adjust grid size if fewer samples than cells
-        if num_samples_to_display == 0:
-            print("No samples to display.")
-            return
-        cols = min(cols, num_samples_to_display)
-        rows = (num_samples_to_display + cols -1) // cols
-
-
-    random_indices = random.sample(range(len(full_dataset)), num_samples_to_display)
+    final_indices_to_plot = []
     
-    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 4))
-    if rows * cols == 1: # if single image, axes is not an array
+    if args.display_mode == "all":
+        if len(full_dataset) == 0:
+            print("No samples in dataset to display.")
+            return
+        
+        num_to_sample_all_mode = min(target_num_samples_to_display, len(full_dataset))
+        if len(full_dataset) < target_num_samples_to_display:
+             print(f"Warning: Requested {target_num_samples_to_display} samples for grid, but dataset only has {len(full_dataset)}. Displaying {num_to_sample_all_mode}.")
+        
+        if num_to_sample_all_mode > 0:
+            final_indices_to_plot = random.sample(range(len(full_dataset)), num_to_sample_all_mode)
+        print(f"Selected {len(final_indices_to_plot)} random samples for display (mode: all).")
+
+    else: # "correct" or "incorrect" NME-based filtering
+        print(f"Attempting to find up to {target_num_samples_to_display} '{args.display_mode}' samples by random picking...")
+        
+        num_landmarks_for_nme = args.num_landmarks
+        if num_landmarks_for_nme <= max(args.left_eye_idx, args.right_eye_idx):
+            print(f"Error: num_landmarks ({num_landmarks_for_nme}) must be greater than eye indices ({args.left_eye_idx}, {args.right_eye_idx}) for NME calculation.")
+            return
+        if args.left_eye_idx >= num_landmarks_for_nme or args.right_eye_idx >= num_landmarks_for_nme:
+             print(f"Error: Eye indices ({args.left_eye_idx}, {args.right_eye_idx}) out of bounds for num_landmarks ({num_landmarks_for_nme}).")
+             return
+
+
+        all_possible_indices = list(range(len(full_dataset)))
+        random.shuffle(all_possible_indices) # Shuffle once to iterate randomly without replacement
+        
+        attempted_count = 0
+        for current_random_idx in all_possible_indices:
+            if len(final_indices_to_plot) >= target_num_samples_to_display:
+                break # Found enough samples
+
+            attempted_count += 1
+            try:
+                sample = full_dataset[current_random_idx] # This is the transformed sample
+                img_tensor_for_model = sample['image'].to(device).unsqueeze(0) # Add batch dim
+                
+                # True landmarks are already normalized [0,1] from dataset, shape (num_landmarks * 2)
+                # Reshape for NME: (1, num_landmarks, 2)
+                true_landmarks_nme = sample['facial_landmarks'].clone().float().view(1, num_landmarks_for_nme, 2).to(device)
+
+                with torch.no_grad():
+                    # Model outputs normalized landmarks [0,1], shape (num_landmarks * 2)
+                    pred_landmarks_flat_nme = model(img_tensor_for_model).squeeze(0).cpu() 
+                # Reshape for NME: (1, num_landmarks, 2)
+                pred_landmarks_nme = pred_landmarks_flat_nme.view(1, num_landmarks_for_nme, 2).to(device)
+
+                nme_value = NME(predictions=pred_landmarks_nme, 
+                                ground_truth=true_landmarks_nme,
+                                left_eye_idx=args.left_eye_idx,
+                                right_eye_idx=args.right_eye_idx)
+                nme_value_item = nme_value.item()
+                is_correct = nme_value_item < args.nme_threshold
+                
+                if (args.display_mode == "correct" and is_correct) or (args.display_mode == "incorrect" and not is_correct):
+                    final_indices_to_plot.append(current_random_idx)
+
+            except Exception as e:
+                print(f"Skipping sample index {current_random_idx} during NME pre-filtering due to error: {e}")
+                continue
+        
+        if not final_indices_to_plot:
+            print(f"No samples found matching display_mode '{args.display_mode}' with NME threshold {args.nme_threshold} after checking {attempted_count} samples.")
+            return
+        
+        print(f"Found {len(final_indices_to_plot)} suitable '{args.display_mode}' samples after checking {attempted_count} unique images.")
+
+    actual_num_samples_to_display = len(final_indices_to_plot)
+
+    if actual_num_samples_to_display == 0:
+        print("No samples selected for display.")
+        return
+
+    # Adjust grid based on actual_num_samples_to_display and original_cols preference
+    display_cols = min(original_cols, actual_num_samples_to_display)
+    display_rows = (actual_num_samples_to_display + display_cols - 1) // display_cols
+    
+    fig, axes = plt.subplots(display_rows, display_cols, figsize=(display_cols * 4, display_rows * 4))
+    if actual_num_samples_to_display == 1: # if single image, axes is not an array
         axes = np.array([axes])
     axes = axes.flatten() # Flatten to easily iterate
 
-    print(f"Displaying {num_samples_to_display} random samples in a {rows}x{cols} grid...")
+    print(f"Displaying {actual_num_samples_to_display} samples in a {display_rows}x{display_cols} grid (Mode: {args.display_mode})...")
 
-    for i in range(num_samples_to_display):
-        sample_idx = random_indices[i]
+    for i in range(actual_num_samples_to_display):
+        sample_idx_in_full_dataset = final_indices_to_plot[i]
         try:
             # This sample contains the transformed image and original landmarks
-            sample_transformed = full_dataset[sample_idx]
+            sample_transformed = full_dataset[sample_idx_in_full_dataset]
         except Exception as e:
-            print(f"Error fetching sample at index {sample_idx}: {e}")
+            print(f"Error fetching sample at original index {sample_idx_in_full_dataset}: {e}")
             axes[i].text(0.5, 0.5, "Error loading sample", horizontalalignment='center', verticalalignment='center', transform=axes[i].transAxes)
             axes[i].axis('off')
             continue
 
         # Get original image path to load its dimensions for scaling landmarks
         try:
-            raw_sample_metadata = full_dataset.samples[sample_idx]
+            # Use sample_idx_in_full_dataset to get metadata from the original samples list
+            raw_sample_metadata = full_dataset.samples[sample_idx_in_full_dataset]
             original_image_path = raw_sample_metadata['image_path']
             with Image.open(original_image_path) as img_original:
                 original_width, original_height = img_original.size
         except Exception as e:
-            print(f"Error getting original image dimensions for sample {sample_idx} ({original_image_path}): {e}")
+            print(f"Error getting original image dimensions for sample {sample_idx_in_full_dataset} ({original_image_path}): {e}")
             axes[i].text(0.5, 0.5, "Error scaling GT", horizontalalignment='center', verticalalignment='center', transform=axes[i].transAxes)
             axes[i].axis('off')
             continue
-
-        image_tensor_resized = sample_transformed['image'].to(device)
-
-        # Define the normalization factor used by MPIIFaceGazeDataset
-        # MPIIFaceGazeDataset normalizes original pixel coordinates by its self.img_size (default 224)
-        # DATASET_NORMALIZATION_FACTOR = 224.0 # This was incorrect. Dataset normalizes by original image dimensions.
-
-        # --- Ground Truth Landmarks --- 
-        # sample_transformed['facial_landmarks'] are normalized by original image dimensions (range [0,1])
-        true_landmarks_from_dataset = sample_transformed['facial_landmarks'].clone().float().view(-1, 2)
         
-        scaled_true_landmarks = true_landmarks_from_dataset.clone()
-        # Scale normalized [0,1] coordinates to the displayed image size (args.img_size)
-        scaled_true_landmarks[:, 0] = true_landmarks_from_dataset[:, 0] * args.img_size
-        scaled_true_landmarks[:, 1] = true_landmarks_from_dataset[:, 1] * args.img_size
-        true_landmarks_for_plot = scaled_true_landmarks.view(-1) # Flatten for plotting function
-
-        # --- Predicted Landmarks --- 
-        # Model expects batch dimension.
-        # Assume model outputs landmarks normalized to its input image space (range [0,1]), relative to args.img_size.
-        image_batch = image_tensor_resized.unsqueeze(0)
+        image_tensor_resized = sample_transformed['image'].to(device) # This is already transformed (resized, ToTensor, normalized)
+        true_landmarks_from_dataset_normalized = sample_transformed['facial_landmarks'].clone().float() # (num_landmarks * 2), normalized [0,1]
+        
+        image_batch_for_model = image_tensor_resized.unsqueeze(0) # Add batch for model
         with torch.no_grad():
-            pred_landmarks_from_model_flat = model(image_batch).squeeze(0).cpu() # Shape (num_landmarks * 2)
+            pred_landmarks_from_model_normalized_flat = model(image_batch_for_model).squeeze(0).cpu() # (num_landmarks * 2), normalized [0,1]
         
-        pred_landmarks_from_model = pred_landmarks_from_model_flat.view(-1, 2) # Reshape to (num_landmarks, 2)
+        # --- Calculate NME for this specific sample for display --- 
+        nme_value_for_display = -1.0 # Default in case of error
+        try:
+            # Reshape for NME: (1, num_landmarks, 2)
+            true_lmks_nme_shape = true_landmarks_from_dataset_normalized.view(1, args.num_landmarks, 2).to(device)
+            pred_lmks_nme_shape = pred_landmarks_from_model_normalized_flat.view(1, args.num_landmarks, 2).to(device)
+            
+            if args.num_landmarks > max(args.left_eye_idx, args.right_eye_idx) and \
+               args.left_eye_idx < args.num_landmarks and args.right_eye_idx < args.num_landmarks:
+                nme_value_for_display = NME(predictions=pred_lmks_nme_shape, 
+                                            ground_truth=true_lmks_nme_shape,
+                                            left_eye_idx=args.left_eye_idx,
+                                            right_eye_idx=args.right_eye_idx).item()
+            else:
+                print(f"Warning: Cannot calculate NME for sample {sample_idx_in_full_dataset} due to invalid eye indices or num_landmarks mismatch. L:{args.left_eye_idx}, R:{args.right_eye_idx}, NumL:{args.num_landmarks}")
+
+        except Exception as e_nme:
+            print(f"Error calculating NME for display for sample {sample_idx_in_full_dataset}: {e_nme}")
+        # --- End NME Calculation for display ---
+
+        # Landmarks for plotting need to be scaled to img_size
+        # True landmarks (already normalized from dataset)
+        scaled_true_landmarks = true_landmarks_from_dataset_normalized.view(-1, 2).clone()
+        scaled_true_landmarks[:, 0] *= args.img_size
+        scaled_true_landmarks[:, 1] *= args.img_size
+        true_landmarks_for_plot = scaled_true_landmarks.view(-1) 
+
+        # Predicted landmarks (already normalized from model)
+        scaled_pred_landmarks = pred_landmarks_from_model_normalized_flat.view(-1, 2).clone()
+        scaled_pred_landmarks[:, 0] *= args.img_size
+        scaled_pred_landmarks[:, 1] *= args.img_size
+        pred_landmarks_for_plot = scaled_pred_landmarks.view(-1)
         
-        scaled_pred_landmarks = pred_landmarks_from_model.clone()
-        # Scale normalized [0,1] coordinates to the displayed image size (args.img_size)
-        scaled_pred_landmarks[:, 0] = pred_landmarks_from_model[:, 0] * args.img_size
-        scaled_pred_landmarks[:, 1] = pred_landmarks_from_model[:, 1] * args.img_size
-        pred_landmarks_for_plot = scaled_pred_landmarks.view(-1) # Flatten for plotting function
+        plot_image_and_landmarks(axes[i], image_tensor_resized.cpu(), true_landmarks_for_plot, pred_landmarks_for_plot, CURRENT_MEAN, CURRENT_STD)
         
-        # plot_image_and_landmarks expects landmarks in pixel coordinates of the displayed image
-        plot_image_and_landmarks(axes[i], image_tensor_resized.cpu(), true_landmarks_for_plot, pred_landmarks_for_plot, args.img_size)
-        axes[i].set_title(f"Sample {sample_idx} (Orig: {original_width}x{original_height})")
+        title_str = f"ID: {sample_idx_in_full_dataset}"
+        if nme_value_for_display >= 0:
+            title_str += f" NME: {nme_value_for_display:.4f}"
+        axes[i].set_title(title_str)
 
     # Add a single legend for the entire figure
     handles, labels = [], []
