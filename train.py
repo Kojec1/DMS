@@ -102,111 +102,65 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epo
 
 
             with record_function("data_loading_and_preprocessing"): # Custom label for this block
-                images = batch_data['image'].to(device)
-                targets = batch_data['facial_landmarks'].to(device).view(images.size(0), -1)
+                images = batch_data['image'].to(device, non_blocking=True)
+                gt_landmarks_flat = batch_data['facial_landmarks'].to(device, non_blocking=True).view(images.size(0), -1)
+                gt_landmarks_reshaped = batch_data['facial_landmarks'].to(device, non_blocking=True)
             
-            # The print statement for targets can be verbose, consider removing for profiling
-            # print(f"Targets: {targets[0]}")
-
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             
             if args.amp:
                 with record_function("forward_backward_amp"): # Custom label
                     with torch.amp.autocast(device_type='cuda'):
-                        outputs = model(images)
-                        loss = criterion(outputs, targets)
+                        outputs_flat = model(images)
+                        loss = criterion(outputs_flat, gt_landmarks_flat)
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
             else:
                 with record_function("forward_backward_no_amp"): # Custom label
-                    outputs = model(images)
-                    loss = criterion(outputs, targets)
+                    outputs_flat = model(images)
+                    loss = criterion(outputs_flat, gt_landmarks_flat)
                     loss.backward()
                     optimizer.step()
+
+            loss_accumulator += loss.detach()
+
+            # Calculate NME and MSE
+            outputs_reshaped = outputs_flat.detach().view(outputs_flat.size(0), -1, 2)
             
-            # The print statement for outputs can be verbose, consider removing for profiling
-            # print(f"Outputs: {outputs[0]}")
-            
-            total_loss += loss.item()
-            
+            # NME - outer eye corner landmarks have indices 0 and 3
+            current_nme = NME(outputs_reshaped, gt_landmarks_reshaped, left_eye_idx=0, right_eye_idx=3)
+            nme_accumulator += current_nme.detach()
+
+            # MSE
+            current_mse = torch.nn.functional.mse_loss(outputs_flat.detach(), gt_landmarks_flat)
+            mse_accumulator += current_mse.detach()
+                        
+            # Log training progress
             if (batch_idx + 1) % args.log_interval == 0 or batch_idx == len(dataloader) -1:
                 current_loss = loss.item()
-                avg_epoch_loss = total_loss / (batch_idx + 1)
+                avg_epoch_loss = loss_accumulator.item() / (batch_idx + 1)
+                avg_epoch_nme = nme_accumulator.item() / (batch_idx + 1)
+                avg_epoch_mse = mse_accumulator.item() / (batch_idx + 1)
                 elapsed_time = time.time() - start_time
-                # print(f'Epoch [{epoch+1}/{args.epochs}], Step [{batch_idx+1}/{len(dataloader)}], ' \ # Original print
-                #       f'Loss: {current_loss:.4f} (Avg Epoch: {avg_epoch_loss:.4f}), Time: {elapsed_time:.2f}s')
-                # Quieter print for profiling, or remove entirely if focusing on profiler output
-                if not (epoch == 0 and prof is not None and hasattr(prof, 'stop')): # Don't print if inside active profiling period that will break
-                    print(f'Epoch [{epoch+1}/{args.epochs}], Step [{batch_idx+1}/{len(dataloader)}], Loss: {current_loss:.4f}')
-                start_time = time.time() 
+                print(f'Epoch [{epoch+1}/{args.epochs}], Step [{batch_idx+1}/{len(dataloader)}], '
+                    f'Loss: {current_loss:.6f} (Avg Epoch: {avg_epoch_loss:.6f}), '
+                    f'NME: {current_nme.item():.6f} (Avg Epoch: {avg_epoch_nme:.6f}), '
+                    f'MSE: {current_mse.item():.6f} (Avg Epoch: {avg_epoch_mse:.6f}), Time: {elapsed_time:.2f}s')
+                start_time = time.time() # Reset timer for next log interval reporting
+        
+                    
+    avg_loss = (loss_accumulator / len(dataloader)).item()
+    avg_nme = (nme_accumulator / len(dataloader)).item()
+    avg_mse = (mse_accumulator / len(dataloader)).item()
 
     if epoch == 0 and prof is not None and hasattr(prof, 'key_averages'): # Check if it's the actual profiler
         print("--- Profiler Results (First Epoch, First Few Batches) ---")
         print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=15))
         print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=15))
-        # To export trace for Chrome Trace Viewer:
-        # prof.export_chrome_trace(os.path.join(args.checkpoint_dir, "profiler_trace_epoch0.json"))
-        # print(f"Profiler trace saved to {os.path.join(args.checkpoint_dir, 'profiler_trace_epoch0.json')}")
-        # To export stack trace:
-        # prof.export_stacks(os.path.join(args.checkpoint_dir, "profiler_stacks_epoch0.txt"), "self_cuda_time_total")
-        # print(f"Profiler stacks saved to {os.path.join(args.checkpoint_dir, 'profiler_stacks_epoch0.txt')}")
+
         print("--- End Profiler Results ---")
-        # Optionally, exit after profiling the first few batches of the first epoch to focus on analysis
-        # import sys
-        # sys.exit("Exiting after profiling.")
             
-    return total_loss / (len(dataloader) if (epoch != 0 or prof is None or not hasattr(prof, 'stop') or batch_idx == len(dataloader)-1) else profile_batches)
-    for batch_idx, batch_data in tqdm(enumerate(dataloader), total=len(dataloader), desc="Training"):
-        images = batch_data['image'].to(device, non_blocking=True)
-        gt_landmarks_flat = batch_data['facial_landmarks'].to(device, non_blocking=True).view(images.size(0), -1)
-        gt_landmarks_reshaped = batch_data['facial_landmarks'].to(device, non_blocking=True)
-        
-        optimizer.zero_grad(set_to_none=True)
-        
-        if args.amp:
-            with torch.amp.autocast(device_type='cuda'):
-                outputs_flat = model(images) # Shape (N, num_landmarks * 2)
-                loss = criterion(outputs_flat, gt_landmarks_flat)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            outputs_flat = model(images) # Shape (N, num_landmarks * 2)
-            loss = criterion(outputs_flat, gt_landmarks_flat)
-            loss.backward()
-            optimizer.step()
-        
-        loss_accumulator += loss.detach()
-
-        # Calculate NME and MSE
-        outputs_reshaped = outputs_flat.detach().view(outputs_flat.size(0), -1, 2)
-        
-        # NME - outer eye corner landmarks have indices 0 and 3
-        current_nme = NME(outputs_reshaped, gt_landmarks_reshaped, left_eye_idx=0, right_eye_idx=3)
-        nme_accumulator += current_nme.detach()
-
-        # MSE
-        current_mse = torch.nn.functional.mse_loss(outputs_flat.detach(), gt_landmarks_flat)
-        mse_accumulator += current_mse.detach()
-
-        # Log training progress
-        if (batch_idx + 1) % args.log_interval == 0 or batch_idx == len(dataloader) -1:
-            current_loss = loss.item()
-            avg_epoch_loss = loss_accumulator.item() / (batch_idx + 1)
-            avg_epoch_nme = nme_accumulator.item() / (batch_idx + 1)
-            avg_epoch_mse = mse_accumulator.item() / (batch_idx + 1)
-            elapsed_time = time.time() - start_time
-            print(f'Epoch [{epoch+1}/{args.epochs}], Step [{batch_idx+1}/{len(dataloader)}], '
-                  f'Loss: {current_loss:.6f} (Avg Epoch: {avg_epoch_loss:.6f}), '
-                  f'NME: {current_nme.item():.6f} (Avg Epoch: {avg_epoch_nme:.6f}), '
-                  f'MSE: {current_mse.item():.6f} (Avg Epoch: {avg_epoch_mse:.6f}), Time: {elapsed_time:.2f}s')
-            start_time = time.time() # Reset timer for next log interval reporting
-            
-    avg_loss = (loss_accumulator / len(dataloader)).item()
-    avg_nme = (nme_accumulator / len(dataloader)).item()
-    avg_mse = (mse_accumulator / len(dataloader)).item()
-
     return avg_loss, avg_nme, avg_mse
 
 def validate(model, dataloader, criterion, device, args):
