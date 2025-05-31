@@ -11,7 +11,7 @@ from tqdm import tqdm
 from nn.modules.facial_landmark_estimator import FacialLandmarkEstimator
 from nn.loss import SmoothWingLoss
 from nn.metrics import NME
-from data.dataset import MPIIFaceGazeDataset
+from data.dataset import MPIIFaceGazeDataset, WFLWDataset
 from utils.visualization import plot_training_history
 from utils.misc import set_seed, setup_device
 from utils.checkpoint import save_checkpoint, load_checkpoint, save_history, load_history
@@ -19,10 +19,14 @@ from utils.checkpoint import save_checkpoint, load_checkpoint, save_history, loa
 
 # Configuration
 def get_args():
-    parser = argparse.ArgumentParser(description='Facial Landmark Estimation Training using MPIIFaceGazeDataset')
-    parser.add_argument('--data_dir', type=str, required=True, help='Root directory for MPIIFaceGaze dataset (containing p00, p01, etc.)')
-    parser.add_argument('--num_landmarks', type=int, default=6, help='Number of facial landmarks (MPIIFaceGaze has 6)')
-    parser.add_argument('--img_size', type=int, default=224, help='Input image size (height and width) for ConvNeXt, e.g., 224')
+    parser = argparse.ArgumentParser(description='Facial Landmark Estimation Training')
+    parser.add_argument('--dataset', type=str, required=True, choices=['mpii', 'wflw'],
+                        help='Dataset to use: mpii for MPIIFaceGaze, wflw for WFLW')
+    parser.add_argument('--data_dir', type=str, required=True, help='Root directory for dataset')
+    parser.add_argument('--annotation_file', type=str, 
+                        help='Annotation file path (required for WFLW)')
+    parser.add_argument('--num_landmarks', type=int, default=6, help='Number of facial landmarks')
+    parser.add_argument('--img_size', type=int, default=224, help='Input image size for ConvNeXt')
     parser.add_argument('--input_channels', type=int, default=3, choices=[1, 3], help='Number of input image channels (1 for grayscale, 3 for RGB)')
     parser.add_argument('--batch_size', type=int, default=32, help='Training batch size')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
@@ -53,21 +57,35 @@ def get_args():
     parser.add_argument('--use_cache', action='store_true', help='Use cached images and landmarks')
 
     # Warmup arguments
-    parser.add_argument('--warmup_epochs', type=int, default=0, help='Number of epochs for warmup phase.')
-    parser.add_argument('--warmup_lr', type=float, default=1e-3, help='Learning rate during warmup phase.')
-    parser.add_argument('--freeze_backbone_warmup', action='store_true', help='Freeze backbone weights during warmup phase.')
+    parser.add_argument('--warmup_epochs', type=int, default=0, help='Number of epochs for warmup phase')
+    parser.add_argument('--warmup_lr', type=float, default=1e-3, help='Learning rate during warmup phase')
+    parser.add_argument('--freeze_backbone_warmup', action='store_true', help='Freeze backbone weights during warmup phase')
 
-    # Participant IDs for splitting data
+    # MPII-specific arguments
     parser.add_argument('--train_participant_ids', type=str, default="0,1,2,3,4,5,6,7,8,9,10,11", 
-                        help='Comma-separated list of participant IDs for training (e.g., from 0 to 14 for MPIIFaceGaze)')
+                        help='Comma-separated list of participant IDs for training (MPII only)')
     parser.add_argument('--val_participant_ids', type=str, default="12,13,14", 
-                        help='Comma-separated list of participant IDs for validation')
+                        help='Comma-separated list of participant IDs for validation (MPII only)')
+
+    # WFLW-specific arguments
+    parser.add_argument('--train_annotation_file', type=str,
+                        help='Training annotation file path (WFLW only)')
+    parser.add_argument('--val_annotation_file', type=str,
+                        help='Validation annotation file path (WFLW only)')
+    parser.add_argument('--mpii_landmarks', action='store_true',
+                        help='Extract MPII-style 6 landmarks from WFLW (WFLW only)')
+
+    # NME calculation indices
+    parser.add_argument('--left_eye_idx', type=int, default=0,
+                        help='Index of left eye landmark for NME calculation')
+    parser.add_argument('--right_eye_idx', type=int, default=3,
+                        help='Index of right eye landmark for NME calculation')
 
     return parser.parse_args()
 
 
 # Training and Validation
-def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epoch, args):
+def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epoch, args, landmark_key):
     model.train()
     loss_accumulator = torch.tensor(0.0, device=device)
     nme_accumulator = torch.tensor(0.0, device=device)
@@ -76,20 +94,20 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epo
 
     for batch_idx, batch_data in tqdm(enumerate(dataloader), total=len(dataloader), desc="Training"):
         images = batch_data['image'].to(device, non_blocking=True)
-        gt_landmarks_flat = batch_data['facial_landmarks'].to(device, non_blocking=True).view(images.size(0), -1)
-        gt_landmarks_reshaped = batch_data['facial_landmarks'].to(device, non_blocking=True)
+        gt_landmarks_flat = batch_data[landmark_key].to(device, non_blocking=True).view(images.size(0), -1)
+        gt_landmarks_reshaped = batch_data[landmark_key].to(device, non_blocking=True)
         
         optimizer.zero_grad(set_to_none=True)
         
         if args.amp:
             with torch.amp.autocast(device_type='cuda'):
-                outputs_flat = model(images) # Shape (N, num_landmarks * 2)
+                outputs_flat = model(images)
                 loss = criterion(outputs_flat, gt_landmarks_flat)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            outputs_flat = model(images) # Shape (N, num_landmarks * 2)
+            outputs_flat = model(images)
             loss = criterion(outputs_flat, gt_landmarks_flat)
             loss.backward()
             optimizer.step()
@@ -99,8 +117,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epo
         # Calculate NME and MSE
         outputs_reshaped = outputs_flat.detach().view(outputs_flat.size(0), -1, 2)
         
-        # NME - outer eye corner landmarks have indices 0 and 3
-        current_nme = NME(outputs_reshaped, gt_landmarks_reshaped, left_eye_idx=0, right_eye_idx=3)
+        current_nme = NME(outputs_reshaped, gt_landmarks_reshaped, left_eye_idx=args.left_eye_idx, right_eye_idx=args.right_eye_idx)
         nme_accumulator += current_nme.detach()
 
         # MSE
@@ -126,7 +143,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epo
 
     return avg_loss, avg_nme, avg_mse
 
-def validate(model, dataloader, criterion, device, args):
+def validate(model, dataloader, criterion, device, args, landmark_key):
     model.eval()
     loss_accumulator = torch.tensor(0.0, device=device)
     nme_accumulator = torch.tensor(0.0, device=device)
@@ -135,10 +152,9 @@ def validate(model, dataloader, criterion, device, args):
     with torch.no_grad():
         for batch_data in tqdm(dataloader, total=len(dataloader), desc="Validating"):
             images = batch_data['image'].to(device, non_blocking=True)
-            gt_landmarks_flat = batch_data['facial_landmarks'].to(device, non_blocking=True).view(images.size(0), -1)
-            gt_landmarks_reshaped = batch_data['facial_landmarks'].to(device, non_blocking=True)
+            gt_landmarks_flat = batch_data[landmark_key].to(device, non_blocking=True).view(images.size(0), -1)
+            gt_landmarks_reshaped = batch_data[landmark_key].to(device, non_blocking=True)
             
-            # Use autocast consistently with enabled flag
             with torch.amp.autocast(device_type='cuda', enabled=args.amp):
                 outputs_flat = model(images)
                 loss = criterion(outputs_flat, gt_landmarks_flat)
@@ -148,11 +164,9 @@ def validate(model, dataloader, criterion, device, args):
             # Calculate NME and MSE
             outputs_reshaped = outputs_flat.detach().view(outputs_flat.size(0), -1, 2)
             
-            # NME - outer eye corner landmarks have indices 0 and 3
-            current_nme = NME(outputs_reshaped, gt_landmarks_reshaped, left_eye_idx=0, right_eye_idx=3)
+            current_nme = NME(outputs_reshaped, gt_landmarks_reshaped, left_eye_idx=args.left_eye_idx, right_eye_idx=args.right_eye_idx)
             nme_accumulator += current_nme.detach()
 
-            # MSE
             current_mse = torch.nn.functional.mse_loss(outputs_flat.detach(), gt_landmarks_flat)
             mse_accumulator += current_mse.detach()
             
@@ -166,6 +180,12 @@ def validate(model, dataloader, criterion, device, args):
 # Main Function
 def main():
     args = get_args()
+    
+    if args.dataset == 'wflw':
+        if not args.annotation_file and not (args.train_annotation_file and args.val_annotation_file):
+            print("Error: For WFLW dataset, either --annotation_file or both --train_annotation_file and --val_annotation_file must be provided")
+            return
+    
     set_seed(args.seed)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -208,36 +228,73 @@ def main():
     train_transform = transforms.Compose(train_transform_list)
     val_transform = transforms.Compose(val_transform_list)
 
-    # DataLoaders
-    try:
-        train_ids = [int(p_id) for p_id in args.train_participant_ids.split(',')]
-        val_ids = [int(p_id) for p_id in args.val_participant_ids.split(',')]
-    except ValueError:
-        print("Error: Participant IDs must be comma-separated integers.")
-        return
+    # Dataset creation based on dataset type
+    if args.dataset == 'mpii':
+        try:
+            train_ids = [int(p_id) for p_id in args.train_participant_ids.split(',')]
+            val_ids = [int(p_id) for p_id in args.val_participant_ids.split(',')]
+        except ValueError:
+            print("Error: Participant IDs must be comma-separated integers.")
+            return
 
-    print(f"Training with participant IDs: {train_ids}")
-    print(f"Validating with participant IDs: {val_ids}")
+        print(f"Training with MPII participant IDs: {train_ids}")
+        print(f"Validating with MPII participant IDs: {val_ids}")
 
-    train_dataset = MPIIFaceGazeDataset(dataset_path=args.data_dir, 
-                                        participant_ids=train_ids, 
-                                        transform=train_transform,
-                                        is_train=True,
-                                        affine_aug=args.affine_aug,
-                                        flip_aug=args.flip_aug,
-                                        use_cache=args.use_cache,
-                                        label_smoothing=args.label_smoothing)
-    val_dataset = MPIIFaceGazeDataset(dataset_path=args.data_dir, 
-                                      participant_ids=val_ids, 
-                                      transform=val_transform,
-                                      is_train=False,
-                                      use_cache=args.use_cache)
+        train_dataset = MPIIFaceGazeDataset(
+            dataset_path=args.data_dir, 
+            participant_ids=train_ids, 
+            transform=train_transform,
+            is_train=True,
+            affine_aug=args.affine_aug,
+            flip_aug=args.flip_aug,
+            use_cache=args.use_cache,
+            label_smoothing=args.label_smoothing
+        )
+        val_dataset = MPIIFaceGazeDataset(
+            dataset_path=args.data_dir, 
+            participant_ids=val_ids, 
+            transform=val_transform,
+            is_train=False,
+            use_cache=args.use_cache
+        )
+        landmark_key = 'facial_landmarks'
+        
+    else:  # wflw
+        if args.train_annotation_file and args.val_annotation_file:
+            train_annotation = args.train_annotation_file
+            val_annotation = args.val_annotation_file
+        else:
+            train_annotation = val_annotation = args.annotation_file
+            
+        print(f"Training with WFLW annotation: {train_annotation}")
+        print(f"Validating with WFLW annotation: {val_annotation}")
+
+        train_dataset = WFLWDataset(
+            annotation_file=train_annotation,
+            images_dir=args.data_dir,
+            transform=train_transform,
+            is_train=True,
+            affine_aug=args.affine_aug,
+            flip_aug=args.flip_aug,
+            use_cache=args.use_cache,
+            label_smoothing=args.label_smoothing,
+            mpii_landmarks=args.mpii_landmarks
+        )
+        val_dataset = WFLWDataset(
+            annotation_file=val_annotation,
+            images_dir=args.data_dir,
+            transform=val_transform,
+            is_train=False,
+            use_cache=args.use_cache,
+            mpii_landmarks=args.mpii_landmarks
+        )
+        landmark_key = 'landmarks'
     
     if not train_dataset.samples:
-        print(f"Error: No training samples found. Check data_dir ('{args.data_dir}') and train_participant_ids ('{args.train_participant_ids}').")
+        print(f"Error: No training samples found. Check data paths and configurations.")
         return
     if not val_dataset.samples:
-        print(f"Error: No validation samples found. Check data_dir ('{args.data_dir}') and val_participant_ids ('{args.val_participant_ids}').")
+        print(f"Error: No validation samples found. Check data paths and configurations.")
         return
 
     # Optimized DataLoader settings for reduced CPU overhead
@@ -386,8 +443,8 @@ def main():
         
         history['lr'].append(optimizer.param_groups[0]['lr'])  # Record LR for the epoch
 
-        train_loss, train_nme, train_mse = train_one_epoch(model, train_loader, criterion, optimizer, scaler, device, epoch, args)
-        val_loss, val_nme, val_mse = validate(model, val_loader, criterion, device, args)
+        train_loss, train_nme, train_mse = train_one_epoch(model, train_loader, criterion, optimizer, scaler, device, epoch, args, landmark_key)
+        val_loss, val_nme, val_mse = validate(model, val_loader, criterion, device, args, landmark_key)
         
         # Step the scheduler if in main training phase (and scheduler exists)
         if not is_warmup_epoch and scheduler is not None:
@@ -408,14 +465,14 @@ def main():
         if (epoch + 1) % args.checkpoint_freq == 0 or (epoch + 1) == args.epochs:
             checkpoint_path = os.path.join(args.checkpoint_dir, f'epoch_{epoch+1}.pth')
             # Pass scheduler to save_checkpoint
-            save_checkpoint(epoch, model, optimizer, scheduler, scaler if args.amp else None, checkpoint_path)
+            save_checkpoint(epoch, model, optimizer, scheduler, scaler if args.amp else None, checkpoint_path, args.num_landmarks, args.dataset)
             save_history(history, history_filepath)
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_checkpoint_path = os.path.join(args.checkpoint_dir, 'best_model.pth')
             # Pass scheduler to save_checkpoint
-            save_checkpoint(epoch, model, optimizer, scheduler, scaler if args.amp else None, best_checkpoint_path)
+            save_checkpoint(epoch, model, optimizer, scheduler, scaler if args.amp else None, best_checkpoint_path, args.num_landmarks, args.dataset)
             save_history(history, history_filepath)
             print(f"New best validation loss: {best_val_loss:.6f}. Saved best model to {best_checkpoint_path}")
         
