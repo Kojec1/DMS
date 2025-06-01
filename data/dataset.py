@@ -394,7 +394,7 @@ class Face300WDataset(BaseDataset):
     - 48: Left mouth
     - 54: Right mouth
     """
-    def __init__(self, root_dir, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, subset=None, mpii_landmarks=False, padding_ratio=0.3, translation_ratio=0.2):
+    def __init__(self, root_dir, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, subset=None, mpii_landmarks=False, padding_ratio=0.3, translation_ratio=0.2, train_test_split=0.8, split='train', split_seed=42):
         super().__init__(transform)
         self.root_dir = root_dir
         self.samples = []
@@ -407,6 +407,9 @@ class Face300WDataset(BaseDataset):
         self.mpii_landmarks = mpii_landmarks
         self.padding_ratio = padding_ratio
         self.translation_ratio = translation_ratio
+        self.train_test_split = train_test_split  # Ratio of training data (0.0 to 1.0)
+        self.split = split  # 'train' or 'test'
+        self.split_seed = split_seed  # Seed for reproducible splits
         
         if self.use_cache:
             self.image_cache = {}
@@ -424,6 +427,8 @@ class Face300WDataset(BaseDataset):
         else:
             subdirs = ['01_Indoor', '02_Outdoor']
 
+        all_samples = []  # Collect all samples first, then split
+        
         for subdir in subdirs:
             subdir_path = os.path.join(self.root_dir, subdir)
             if not os.path.exists(subdir_path):
@@ -455,13 +460,47 @@ class Face300WDataset(BaseDataset):
                         'subset': subdir,
                         'image_name': image_file
                     }
-                    self.samples.append(sample_data)
+                    all_samples.append(sample_data)
 
                 except Exception as e:
                     print(f"Warning: Error processing {pts_path}: {e}. Skipping.")
                     continue
 
-        print(f"Loaded {len(self.samples)} samples from 300W dataset.")
+        print(f"Loaded {len(all_samples)} total samples from 300W dataset.")
+        
+        # Perform train/test split
+        if len(all_samples) == 0:
+            print("Warning: No samples found to split.")
+            self.samples = []
+            return
+            
+        # Set random seed for reproducible splits
+        import random
+        random.seed(self.split_seed)
+        
+        # Shuffle samples to ensure random distribution
+        all_samples_copy = all_samples.copy()
+        random.shuffle(all_samples_copy)
+        
+        # Calculate split index
+        n_total = len(all_samples_copy)
+        n_train = int(n_total * self.train_test_split)
+        
+        # Split samples
+        if self.split == 'train':
+            self.samples = all_samples_copy[:n_train]
+            print(f"Using {len(self.samples)} samples for training (split ratio: {self.train_test_split:.2f})")
+        elif self.split == 'test':
+            self.samples = all_samples_copy[n_train:]
+            print(f"Using {len(self.samples)} samples for testing (split ratio: {1-self.train_test_split:.2f})")
+        else:
+            raise ValueError(f"Invalid split value: {self.split}. Must be 'train' or 'test'.")
+            
+        if len(self.samples) == 0:
+            print(f"Warning: No samples in {self.split} split. Consider adjusting train_test_split ratio.")
+        
+        # Reset random seed to avoid affecting other random operations
+        random.seed()
 
     def _parse_pts_file(self, pts_path):
         """Parse a .pts annotation file and return landmarks as numpy array."""

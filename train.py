@@ -11,7 +11,7 @@ from tqdm import tqdm
 from nn.modules.facial_landmark_estimator import FacialLandmarkEstimator
 from nn.loss import SmoothWingLoss
 from nn.metrics import NME
-from data.dataset import MPIIFaceGazeDataset, WFLWDataset
+from data.dataset import MPIIFaceGazeDataset, WFLWDataset, Face300WDataset
 from utils.visualization import plot_training_history
 from utils.misc import set_seed, setup_device
 from utils.checkpoint import save_checkpoint, load_checkpoint, save_history, load_history
@@ -20,14 +20,14 @@ from utils.checkpoint import save_checkpoint, load_checkpoint, save_history, loa
 # Configuration
 def get_args():
     parser = argparse.ArgumentParser(description='Facial Landmark Estimation Training')
-    parser.add_argument('--dataset', type=str, required=True, choices=['mpii', 'wflw'],
-                        help='Dataset to use: mpii for MPIIFaceGaze, wflw for WFLW')
+    parser.add_argument('--dataset', type=str, required=True, choices=['mpii', 'wflw', '300w'],
+                        help='Dataset to use: mpii for MPIIFaceGaze, wflw for WFLW, 300w for Face300W')
     parser.add_argument('--data_dir', type=str, required=True, help='Root directory for dataset')
     parser.add_argument('--annotation_file', type=str, 
                         help='Annotation file path (required for WFLW)')
     parser.add_argument('--num_landmarks', type=int, default=6, help='Number of facial landmarks')
     parser.add_argument('--img_size', type=int, default=224, help='Input image size for ConvNeXt')
-    parser.add_argument('--input_channels', type=int, default=3, choices=[1, 3], help='Number of input image channels (1 for grayscale, 3 for RGB)')
+    parser.add_argument('--input_channels', type=int, default=1, choices=[1, 3], help='Number of input image channels (1 for grayscale, 3 for RGB)')
     parser.add_argument('--batch_size', type=int, default=32, help='Training batch size')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
@@ -74,6 +74,18 @@ def get_args():
                         help='Validation annotation file path (WFLW only)')
     parser.add_argument('--mpii_landmarks', action='store_true',
                         help='Extract MPII-style 6 landmarks from WFLW (WFLW only)')
+
+    # 300W-specific arguments
+    parser.add_argument('--subset', type=str, choices=['indoor', 'outdoor'], 
+                        help='Subset to load for 300W dataset (indoor/outdoor, default: both)')
+    parser.add_argument('--padding_ratio', type=float, default=0.3,
+                        help='Padding ratio for landmark-based cropping in 300W dataset (default: 0.3)')
+    parser.add_argument('--translation_ratio', type=float, default=0.2,
+                        help='Random translation ratio for landmark-based cropping in 300W dataset (default: 0.2)')
+    parser.add_argument('--train_test_split', type=float, default=0.8,
+                        help='Train/test split ratio for 300W dataset (default: 0.8 = 80% train, 20% test)')
+    parser.add_argument('--split_seed', type=int, default=42,
+                        help='Random seed for reproducible train/test splits in 300W dataset (default: 42)')
 
     # NME calculation indices
     parser.add_argument('--left_eye_idx', type=int, default=0,
@@ -186,6 +198,11 @@ def main():
             print("Error: For WFLW dataset, either --annotation_file or both --train_annotation_file and --val_annotation_file must be provided")
             return
     
+    if args.dataset == '300w':
+        if not (0.0 < args.train_test_split < 1.0):
+            print(f"Error: train_test_split must be between 0.0 and 1.0, got {args.train_test_split}")
+            return
+    
     set_seed(args.seed)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -259,7 +276,7 @@ def main():
         )
         landmark_key = 'facial_landmarks'
         
-    else:  # wflw
+    elif args.dataset == 'wflw':
         if args.train_annotation_file and args.val_annotation_file:
             train_annotation = args.train_annotation_file
             val_annotation = args.val_annotation_file
@@ -289,7 +306,44 @@ def main():
             mpii_landmarks=args.mpii_landmarks
         )
         landmark_key = 'landmarks'
-    
+        
+    else:  # 300w
+        subset_str = f" ({args.subset} subset)" if args.subset else " (both subsets)"
+        print(f"Training with 300W dataset from {args.data_dir}{subset_str}")
+        print(f"Using padding_ratio={args.padding_ratio}, translation_ratio={args.translation_ratio}")
+        print(f"Train/test split: {args.train_test_split:.2f}/{1-args.train_test_split:.2f} (seed: {args.split_seed})")
+
+        train_dataset = Face300WDataset(
+            root_dir=args.data_dir,
+            subset=args.subset,
+            transform=train_transform,
+            is_train=True,
+            affine_aug=args.affine_aug,
+            flip_aug=args.flip_aug,
+            use_cache=args.use_cache,
+            label_smoothing=args.label_smoothing,
+            mpii_landmarks=args.mpii_landmarks,
+            padding_ratio=args.padding_ratio,
+            translation_ratio=args.translation_ratio,
+            train_test_split=args.train_test_split,
+            split='train',
+            split_seed=args.split_seed
+        )
+        val_dataset = Face300WDataset(
+            root_dir=args.data_dir,
+            subset=args.subset,
+            transform=val_transform,
+            is_train=False,
+            use_cache=args.use_cache,
+            mpii_landmarks=args.mpii_landmarks,
+            padding_ratio=args.padding_ratio,
+            translation_ratio=0.0,  # No translation during validation
+            train_test_split=args.train_test_split,
+            split='test',
+            split_seed=args.split_seed
+        )
+        landmark_key = 'landmarks'
+
     if not train_dataset.samples:
         print(f"Error: No training samples found. Check data paths and configurations.")
         return

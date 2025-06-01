@@ -52,6 +52,12 @@ def get_args():
                         help='Padding ratio for landmark-based cropping in 300W dataset (default: 0.3)')
     parser.add_argument('--translation_ratio', type=float, default=0.2,
                         help='Random translation ratio for landmark-based cropping in 300W dataset (default: 0.0, no translation)')
+    parser.add_argument('--train_test_split', type=float, default=0.8,
+                        help='Train/test split ratio for 300W dataset (default: 0.8)')
+    parser.add_argument('--split_seed', type=int, default=42,
+                        help='Random seed for reproducible train/test splits in 300W dataset (default: 42)')
+    parser.add_argument('--data_split', type=str, choices=['train', 'test'], default='test',
+                        help='Which split to visualize for 300W dataset (default: test)')
     
     return parser.parse_args()
 
@@ -126,6 +132,11 @@ def main():
         print("Error: --annotation_file is required for WFLW dataset")
         return
 
+    if args.dataset == '300w':
+        if not (0.0 < args.train_test_split < 1.0):
+            print(f"Error: train_test_split must be between 0.0 and 1.0, got {args.train_test_split}")
+            return
+
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
     print(f"Using device: {device}")
 
@@ -193,7 +204,8 @@ def main():
 
         elif args.dataset == '300w':
             subset_str = f" ({args.subset} subset)" if args.subset else " (both subsets)"
-            print(f"Loading 300W data from {args.data_dir}{subset_str}")
+            split_str = f" ({args.data_split} split)"
+            print(f"Loading 300W data from {args.data_dir}{subset_str}{split_str}")
             full_dataset = Face300WDataset(
                 root_dir=args.data_dir,
                 subset=args.subset,
@@ -201,7 +213,10 @@ def main():
                 is_train=False,
                 mpii_landmarks=args.mpii_landmarks,
                 padding_ratio=args.padding_ratio,
-                translation_ratio=args.translation_ratio
+                translation_ratio=args.translation_ratio,
+                train_test_split=args.train_test_split,
+                split=args.data_split,
+                split_seed=args.split_seed
             )
             landmark_key = 'landmarks'
         else:
