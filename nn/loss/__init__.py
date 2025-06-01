@@ -1,3 +1,3 @@
-from .landmark_loss import SmoothWingLoss
+from .landmark_loss import SmoothWingLoss, MultiTaskLoss
 
-__all__ = ['SmoothWingLoss']
+__all__ = ['SmoothWingLoss', 'MultiTaskLoss']

@@ -24,3 +24,27 @@ class SmoothWingLoss(nn.Module):
 
         # Combine losses
         return torch.mean(torch.cat([loss_nonlinear, loss_linear]))
+
+
+class MultiTaskLoss(nn.Module):
+    """
+    Multi-task loss that handles different landmark configurations
+    and allows for task-specific loss weighting.
+    """
+    def __init__(self, task_weights=None, omega=0.15, epsilon=0.01):
+        super().__init__()
+        self.base_loss = SmoothWingLoss(omega=omega, epsilon=epsilon)
+        self.task_weights = task_weights or {'mpii': 1.0, 'wflw': 1.0, '300w': 1.0}
+        
+    def forward(self, predictions_dict, targets_dict):
+        total_loss = 0.0
+        task_losses = {}
+        
+        for task in predictions_dict:
+            if task in targets_dict:
+                task_loss = self.base_loss(predictions_dict[task], targets_dict[task])
+                weighted_loss = task_loss * self.task_weights[task]
+                total_loss += weighted_loss
+                task_losses[task] = task_loss.item()
+        
+        return total_loss, task_losses

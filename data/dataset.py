@@ -2,10 +2,11 @@ from torch.utils.data import Dataset
 import os
 import numpy as np
 import torch
-from PIL import Image, ImageOps
+from PIL import Image
 import torchvision.transforms.functional as TF
 import random
 from .augmentation import horizontal_flip, normalize_landmarks, crop_to_content, apply_clahe, random_affine_with_landmarks, landmarks_smoothing, crop_to_landmarks
+
 
 class BaseDataset(Dataset):
     """Base PyTorch Dataset template. Custom datasets should inherit from this class."""
@@ -630,3 +631,87 @@ class Face300WDataset(BaseDataset):
         item_to_return['image_path'] = image_path
 
         return item_to_return
+
+
+class MultiDatasetWrapper(Dataset):
+    """
+    Wrapper class that combines multiple datasets for multi-task learning.
+    Handles dataset balancing and task assignment.
+    """
+    def __init__(self, datasets_dict, balancing_strategy='weighted_sampling', weights=None):
+        self.datasets = datasets_dict
+        self.task_names = list(datasets_dict.keys())
+        self.balancing_strategy = balancing_strategy
+        
+        # Calculate dataset sizes
+        self.dataset_sizes = {task: len(dataset) for task, dataset in datasets_dict.items()}
+        self.total_samples = sum(self.dataset_sizes.values())
+        
+        # Create sample mappings
+        self.samples = []
+        self.sample_weights = []
+        
+        for task_name, dataset in datasets_dict.items():
+            for idx in range(len(dataset)):
+                self.samples.append((task_name, idx))
+        
+        # Calculate sampling weights
+        if balancing_strategy == 'weighted_sampling':
+            self._calculate_weighted_sampling_weights(weights)
+        elif balancing_strategy == 'equal_sampling':
+            self._calculate_equal_sampling_weights()
+        else:  # natural
+            self.sample_weights = [1.0] * len(self.samples)
+            
+        print(f"MultiDatasetWrapper initialized with {len(self.samples)} total samples")
+        print(f"Dataset sizes: {self.dataset_sizes}")
+        print(f"Balancing strategy: {balancing_strategy}")
+    
+    def _calculate_weighted_sampling_weights(self, custom_weights=None):
+        """Calculate weights for weighted sampling to balance datasets"""
+        if custom_weights is None:
+            # Inverse frequency weighting
+            max_size = max(self.dataset_sizes.values())
+            dataset_weights = {task: max_size / size for task, size in self.dataset_sizes.items()}
+        else:
+            dataset_weights = custom_weights
+            
+        for task_name, _ in self.samples:
+            self.sample_weights.append(dataset_weights[task_name])
+            
+        print(f"Dataset weights: {dataset_weights}")
+    
+    def _calculate_equal_sampling_weights(self):
+        """Calculate weights for equal sampling from each dataset"""
+        # Weight inversely proportional to dataset size
+        for task_name, _ in self.samples:
+            weight = 1.0 / self.dataset_sizes[task_name]
+            self.sample_weights.append(weight)
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        task_name, dataset_idx = self.samples[idx]
+        sample = self.datasets[task_name][dataset_idx]
+        
+        # Create a new standardized sample with only the keys we need
+        standardized_sample = {}
+        
+        # Add task information
+        standardized_sample['task'] = task_name
+        
+        # Add image (all datasets should have this)
+        standardized_sample['image'] = sample['image']
+        
+        # Standardize landmark key name and add landmarks
+        if task_name == 'mpii':
+            standardized_sample['landmarks'] = sample['facial_landmarks']
+        else:
+            # For WFLW and 300W, landmarks key already exists
+            standardized_sample['landmarks'] = sample['landmarks']
+        
+        # Add image path for debugging/reference (all datasets should have this)
+        standardized_sample['image_path'] = sample['image_path']
+        
+        return standardized_sample
