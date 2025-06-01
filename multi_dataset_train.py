@@ -11,7 +11,7 @@ import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
 
-from nn.modules.facial_landmark_estimator import MHFacialLandmarkEstimator
+from nn.modules.facial_landmark_estimator import MHFacialLandmarkEstimator, FacialLandmarkEstimator
 from nn.loss import MultiTaskLoss
 from nn.metrics import NME
 from data.dataset import MPIIFaceGazeDataset, WFLWDataset, Face300WDataset, MultiDatasetWrapper
@@ -47,6 +47,8 @@ def get_args():
                         help='Comma-separated task weights for loss (mpii,wflw,300w)')
     parser.add_argument('--use_mpii_landmarks', action='store_true',
                         help='Extract MPII-style 6 landmarks from WFLW and 300W datasets')
+    parser.add_argument('--single_head', action='store_true',
+                        help='Use single-head FacialLandmarkEstimator instead of multi-head model')
     
     # Other parameters
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints_multi', help='Checkpoint directory')
@@ -166,10 +168,18 @@ def train_one_epoch_multi_task(model, dataloader, criterion, optimizer, scaler, 
             
             if args.amp:
                 with torch.amp.autocast(device_type='cuda'):
-                    outputs = model(images, task=task)
+                    # Check if model is single-head or multi-head
+                    if hasattr(args, 'single_head') and args.single_head and args.use_mpii_landmarks:
+                        outputs = model(images)  # Single-head model doesn't take task parameter
+                    else:
+                        outputs = model(images, task=task)  # Multi-head model takes task parameter
                     predictions_dict[task] = outputs
             else:
-                outputs = model(images, task=task)
+                # Check if model is single-head or multi-head
+                if hasattr(args, 'single_head') and args.single_head and args.use_mpii_landmarks:
+                    outputs = model(images)  # Single-head model doesn't take task parameter
+                else:
+                    outputs = model(images, task=task)  # Multi-head model takes task parameter
                 predictions_dict[task] = outputs
             
             task_sample_counts[task] += landmarks.size(0)
@@ -257,7 +267,11 @@ def validate_multi_task(model, dataloader, criterion, device, args):
                 targets_dict[task] = targets_flat
                 
                 with torch.amp.autocast(device_type='cuda', enabled=args.amp):
-                    outputs = model(images, task=task)
+                    # Check if model is single-head or multi-head
+                    if hasattr(args, 'single_head') and args.single_head and args.use_mpii_landmarks:
+                        outputs = model(images)  # Single-head model doesn't take task parameter
+                    else:
+                        outputs = model(images, task=task)  # Multi-head model takes task parameter
                     predictions_dict[task] = outputs
                 
                 task_sample_counts[task] += landmarks.size(0)
@@ -311,6 +325,10 @@ def main():
     # Parse task weights
     task_weight_values = [float(w) for w in args.task_weights.split(',')]
     task_weights = {'mpii': task_weight_values[0], 'wflw': task_weight_values[1], '300w': task_weight_values[2]}
+    
+    # Validate arguments
+    if args.single_head and not args.use_mpii_landmarks:
+        raise ValueError("single_head can only be used with use_mpii_landmarks=True")
     
     # Image transforms
     if args.input_channels == 1:
@@ -454,14 +472,27 @@ def main():
         output_dims = {'mpii': 6, 'wflw': 98, '300w': 68}
     
     # Create model
-    model = MHFacialLandmarkEstimator(
-        output_dims=output_dims,
-        pretrained_backbone=True,
-        in_channels=args.input_channels,
-        dropout_rate=args.dropout_rate
-    ).to(device)
+    if args.single_head and args.use_mpii_landmarks:
+        # Use single-head model for MPII-style landmarks
+        model = FacialLandmarkEstimator(
+            num_landmarks=6,  # MPII landmarks
+            pretrained_backbone=True,
+            in_channels=args.input_channels,
+            dropout_rate=args.dropout_rate
+        ).to(device)
+        print("Using single-head FacialLandmarkEstimator with 6 MPII landmarks")
+    else:
+        # Use multi-head model
+        model = MHFacialLandmarkEstimator(
+            output_dims=output_dims,
+            pretrained_backbone=True,
+            in_channels=args.input_channels,
+            dropout_rate=args.dropout_rate
+        ).to(device)
+        print(f"Using multi-head MHFacialLandmarkEstimator with output dimensions: {output_dims}")
     
-    print(f"Model initialized with output dimensions: {output_dims}")
+    # Add model type flag for training functions
+    is_single_head = args.single_head and args.use_mpii_landmarks
     
     # Loss and optimizer
     criterion = MultiTaskLoss(task_weights=task_weights)
@@ -527,8 +558,15 @@ def main():
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_checkpoint_path = os.path.join(args.checkpoint_dir, 'best_model.pth')
-            save_checkpoint(epoch, model, optimizer, None, scaler if args.amp else None, 
-                          best_checkpoint_path, output_dims, 'multi_task')
+            
+            # Use appropriate model info for checkpoint
+            if args.single_head and args.use_mpii_landmarks:
+                save_checkpoint(epoch, model, optimizer, None, scaler if args.amp else None, 
+                              best_checkpoint_path, 6, 'single_head_mpii')
+            else:
+                save_checkpoint(epoch, model, optimizer, None, scaler if args.amp else None, 
+                              best_checkpoint_path, output_dims, 'multi_task')
+            
             save_history(history, history_filepath)
             print(f"New best validation loss: {best_val_loss:.6f}")
         
