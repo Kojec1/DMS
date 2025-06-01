@@ -5,7 +5,7 @@ import torch
 from PIL import Image, ImageOps
 import torchvision.transforms.functional as TF
 import random
-from .augmentation import horizontal_flip, normalize_landmarks, crop_to_content, apply_clahe, random_affine_with_landmarks, landmarks_smoothing
+from .augmentation import horizontal_flip, normalize_landmarks, crop_to_content, apply_clahe, random_affine_with_landmarks, landmarks_smoothing, crop_to_landmarks
 
 class BaseDataset(Dataset):
     """Base PyTorch Dataset template. Custom datasets should inherit from this class."""
@@ -375,6 +375,218 @@ class WFLWDataset(BaseDataset):
         item_to_return['occlusion'] = torch.tensor(sample['occlusion'], dtype=torch.long)
         item_to_return['blur'] = torch.tensor(sample['blur'], dtype=torch.long)
         
+        item_to_return['image_name'] = sample['image_name']
+        item_to_return['image_path'] = image_path
+
+        return item_to_return
+
+
+class Face300WDataset(BaseDataset):
+    """
+    300W (300 Faces In-the-Wild) Dataset
+    68 facial landmarks
+
+    Landmarks:
+    - 36: Left outer eye
+    - 39: Left inner eye
+    - 42: Right inner eye
+    - 45: Right outer eye
+    - 48: Left mouth
+    - 54: Right mouth
+    """
+    def __init__(self, root_dir, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, subset=None, mpii_landmarks=False, padding_ratio=0.3, translation_ratio=0.2):
+        super().__init__(transform)
+        self.root_dir = root_dir
+        self.samples = []
+        self.is_train = is_train
+        self.affine_aug = affine_aug
+        self.flip_aug = flip_aug
+        self.use_cache = use_cache
+        self.label_smoothing = label_smoothing
+        self.subset = subset  # Can be 'indoor', 'outdoor', or None for both
+        self.mpii_landmarks = mpii_landmarks
+        self.padding_ratio = padding_ratio
+        self.translation_ratio = translation_ratio
+        
+        if self.use_cache:
+            self.image_cache = {}
+            print("Image caching enabled for Face300WDataset.")
+        
+        self._load_annotations()
+
+    def _load_annotations(self):
+        # Define subdirectories to process
+        subdirs = []
+        if self.subset == 'indoor':
+            subdirs = ['01_Indoor']
+        elif self.subset == 'outdoor':
+            subdirs = ['02_Outdoor']
+        else:
+            subdirs = ['01_Indoor', '02_Outdoor']
+
+        for subdir in subdirs:
+            subdir_path = os.path.join(self.root_dir, subdir)
+            if not os.path.exists(subdir_path):
+                print(f"Warning: Subdirectory not found {subdir_path}. Skipping.")
+                continue
+
+            # Find all .pts files in the subdirectory
+            pts_files = [f for f in os.listdir(subdir_path) if f.endswith('.pts')]
+            
+            for pts_file in pts_files:
+                pts_path = os.path.join(subdir_path, pts_file)
+                
+                # Corresponding image file (.png)
+                image_file = pts_file.replace('.pts', '.png')
+                image_path = os.path.join(subdir_path, image_file)
+                
+                if not os.path.exists(image_path):
+                    print(f"Warning: Image file not found {image_path}. Skipping.")
+                    continue
+
+                try:
+                    landmarks = self._parse_pts_file(pts_path)
+                    if landmarks is None:
+                        continue
+
+                    sample_data = {
+                        'image_path': image_path,
+                        'landmarks': landmarks,
+                        'subset': subdir,
+                        'image_name': image_file
+                    }
+                    self.samples.append(sample_data)
+
+                except Exception as e:
+                    print(f"Warning: Error processing {pts_path}: {e}. Skipping.")
+                    continue
+
+        print(f"Loaded {len(self.samples)} samples from 300W dataset.")
+
+    def _parse_pts_file(self, pts_path):
+        """Parse a .pts annotation file and return landmarks as numpy array."""
+        try:
+            with open(pts_path, 'r') as f:
+                lines = f.readlines()
+
+            # Find the line with n_points
+            n_points = None
+            start_idx = None
+            
+            for i, line in enumerate(lines):
+                line = line.strip()
+                if line.startswith('n_points:'):
+                    n_points = int(line.split(':')[1].strip())
+                elif line == '{':
+                    start_idx = i + 1
+                    break
+
+            if n_points is None or start_idx is None:
+                print(f"Warning: Could not parse header in {pts_path}")
+                return None
+
+            if n_points != 68:
+                print(f"Warning: Expected 68 points, got {n_points} in {pts_path}")
+                return None
+
+            # Read landmark coordinates
+            landmarks = []
+            for i in range(start_idx, start_idx + n_points):
+                if i >= len(lines):
+                    print(f"Warning: Not enough coordinate lines in {pts_path}")
+                    return None
+                
+                line = lines[i].strip()
+                if line == '}':
+                    break
+                
+                coords = line.split()
+                if len(coords) != 2:
+                    print(f"Warning: Invalid coordinate format in {pts_path}: {line}")
+                    return None
+                
+                x, y = float(coords[0]), float(coords[1])
+                landmarks.append([x, y])
+
+            if len(landmarks) != n_points:
+                print(f"Warning: Expected {n_points} landmarks, got {len(landmarks)} in {pts_path}")
+                return None
+
+            return np.array(landmarks, dtype=np.float32)
+
+        except Exception as e:
+            print(f"Error parsing {pts_path}: {e}")
+            return None
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        image_path = sample['image_path']
+        
+        landmarks = sample['landmarks'].copy()
+
+        if self.use_cache and image_path in self.image_cache:
+            image, landmarks = self.image_cache[image_path]
+            landmarks = landmarks.copy()
+        else:
+            image = Image.open(image_path).convert('L')
+
+            # Crop to face region based on landmarks with padding and optional random translation
+            translation_ratio = self.translation_ratio if self.is_train else 0.0
+            image, landmarks = crop_to_landmarks(image, landmarks, 
+                                               padding_ratio=self.padding_ratio,
+                                               translation_ratio=translation_ratio)
+            
+            # Apply CLAHE
+            image = apply_clahe(image)
+
+            if self.use_cache:
+                self.image_cache[image_path] = (image.copy(), landmarks.copy())
+
+        if image is None:
+            raise RuntimeError(f"Image object is None for sample {index} ({image_path}).")
+         
+        effective_width, effective_height = image.size 
+
+        # Affine Augmentation
+        if self.is_train and self.affine_aug and random.random() > 0.5:
+            image, landmarks = random_affine_with_landmarks(image, landmarks)
+
+        # Horizontal Flip
+        if self.is_train and self.flip_aug and random.random() > 0.5:
+            image, landmarks = horizontal_flip(image, landmarks, effective_width)
+            # 68-point landmark flipping indices (iBUG 68-point standard)
+            flip_indices = [16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+                           26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
+                           27, 28, 29, 30,
+                           35, 34, 33, 32, 31,
+                           45, 44, 43, 42, 47, 46, 39, 38, 37, 36, 41, 40,
+                           54, 53, 52, 51, 50, 49, 48,
+                           59, 58, 57, 56, 55, 64, 63, 62, 61, 60, 67, 66, 65]
+            landmarks = landmarks[flip_indices, :]
+
+        # Normalize landmarks
+        landmarks = normalize_landmarks(landmarks, effective_width, effective_height)
+
+        # Apply label smoothing
+        if self.is_train and self.label_smoothing > 0:
+            landmarks = landmarks_smoothing(landmarks, smoothing_factor=self.label_smoothing)
+
+        # Extract MPII-style landmarks if requested
+        if self.mpii_landmarks:
+            landmarks = landmarks[[36, 39, 42, 45, 48, 54], :]
+
+        item_to_return = {}
+        if self.transform:
+            item_to_return['image'] = self.transform(image)
+        else:
+            item_to_return['image'] = TF.to_tensor(image)
+
+        # Convert to tensors
+        item_to_return['landmarks'] = torch.from_numpy(landmarks.astype(np.float32))
+        item_to_return['subset'] = sample['subset']
         item_to_return['image_name'] = sample['image_name']
         item_to_return['image_path'] = image_path
 

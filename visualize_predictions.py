@@ -8,15 +8,15 @@ import random
 from PIL import Image
 
 from nn.modules.facial_landmark_estimator import FacialLandmarkEstimator
-from data.dataset import MPIIFaceGazeDataset, WFLWDataset
+from data.dataset import MPIIFaceGazeDataset, WFLWDataset, Face300WDataset
 from utils.misc import set_seed
 from nn.metrics.landmark_metrics import NME
 
 
 def get_args():
     parser = argparse.ArgumentParser(description='Visualize predictions from Facial Landmark Estimator')
-    parser.add_argument('--dataset', type=str, required=True, choices=['mpii', 'wflw'],
-                        help='Dataset to use: mpii for MPIIFaceGaze, wflw for WFLW')
+    parser.add_argument('--dataset', type=str, required=True, choices=['mpii', 'wflw', '300w'],
+                        help='Dataset to use: mpii for MPIIFaceGaze, wflw for WFLW, 300w for 300W')
     parser.add_argument('--data_dir', type=str, required=True, 
                         help='Root directory for dataset')
     parser.add_argument('--annotation_file', type=str, 
@@ -45,7 +45,13 @@ def get_args():
     parser.add_argument('--right_eye_idx', type=int, default=3,
                         help='Index of the right eye landmark for NME calculation')
     parser.add_argument('--mpii_landmarks', action='store_true',
-                        help='Extract MPII-style 6 landmarks from WFLW (for WFLW only)')
+                        help='Extract MPII-style 6 landmarks from WFLW/300W (for WFLW and 300W only)')
+    parser.add_argument('--subset', type=str, choices=['indoor', 'outdoor'], 
+                        help='Subset to load for 300W dataset (indoor/outdoor, default: both)')
+    parser.add_argument('--padding_ratio', type=float, default=0.3,
+                        help='Padding ratio for landmark-based cropping in 300W dataset (default: 0.3)')
+    parser.add_argument('--translation_ratio', type=float, default=0.2,
+                        help='Random translation ratio for landmark-based cropping in 300W dataset (default: 0.0, no translation)')
     
     return parser.parse_args()
 
@@ -60,19 +66,19 @@ def load_model_for_visualization(checkpoint_path, num_landmarks, device, in_chan
         print(f"Error: Checkpoint file not found at {checkpoint_path}")
         return None
     
-    # checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # # Handle potential keys like 'model_state_dict' or direct state_dict
-    # if 'model_state_dict' in checkpoint:
-    #     model_state_dict = checkpoint['model_state_dict']
-    # elif 'model' in checkpoint:
-    #     model_state_dict = checkpoint['model']
-    # else:
-    #     model_state_dict = checkpoint
+    # Handle potential keys like 'model_state_dict' or direct state_dict
+    if 'model_state_dict' in checkpoint:
+        model_state_dict = checkpoint['model_state_dict']
+    elif 'model' in checkpoint:
+        model_state_dict = checkpoint['model']
+    else:
+        model_state_dict = checkpoint
 
-    # model.load_state_dict(model_state_dict)
-    # model.to(device)
-    # model.eval()
+    model.load_state_dict(model_state_dict)
+    model.to(device)
+    model.eval()
     print(f"Model loaded successfully with {in_channels} input channel(s).")
     return model
 
@@ -173,8 +179,8 @@ def main():
                 is_train=False,
             )
             landmark_key = 'facial_landmarks'
-            
-        else:  # wflw
+
+        elif args.dataset == 'wflw':
             print(f"Loading WFLW data from {args.annotation_file}")
             full_dataset = WFLWDataset(
                 annotation_file=args.annotation_file,
@@ -184,6 +190,23 @@ def main():
                 mpii_landmarks=args.mpii_landmarks
             )
             landmark_key = 'landmarks'
+
+        elif args.dataset == '300w':
+            subset_str = f" ({args.subset} subset)" if args.subset else " (both subsets)"
+            print(f"Loading 300W data from {args.data_dir}{subset_str}")
+            full_dataset = Face300WDataset(
+                root_dir=args.data_dir,
+                subset=args.subset,
+                transform=vis_transform,
+                is_train=False,
+                mpii_landmarks=args.mpii_landmarks,
+                padding_ratio=args.padding_ratio,
+                translation_ratio=args.translation_ratio
+            )
+            landmark_key = 'landmarks'
+        else:
+            print(f"Error: Invalid dataset '{args.dataset}'")
+            return
             
     except Exception as e:
         print(f"Error initializing dataset: {e}")
