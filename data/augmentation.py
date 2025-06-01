@@ -65,6 +65,73 @@ def crop_to_content(pil_image, landmarks_np, non_black_threshold=1):
 
     return pil_image, landmarks_np
 
+def crop_to_landmarks(pil_image, landmarks_np, padding_ratio=0.3, translation_ratio=0.2):
+    """
+    Crops the PIL image to the bounding box of facial landmarks with padding.
+    """
+    if landmarks_np.size == 0:
+        print("Warning: No landmarks provided for cropping.")
+        return pil_image, landmarks_np
+    
+    # Get image dimensions
+    img_width, img_height = pil_image.size
+    
+    # Calculate bounding box of landmarks
+    x_min = np.min(landmarks_np[:, 0])
+    x_max = np.max(landmarks_np[:, 0])
+    y_min = np.min(landmarks_np[:, 1])
+    y_max = np.max(landmarks_np[:, 1])
+    
+    # Calculate current bounding box dimensions
+    bbox_width = x_max - x_min
+    bbox_height = y_max - y_min
+    
+    # Add padding
+    padding_x = bbox_width * padding_ratio
+    padding_y = bbox_height * padding_ratio
+    
+    # Calculate base crop coordinates with padding
+    base_crop_x1 = x_min - padding_x
+    base_crop_y1 = y_min - padding_y
+    base_crop_x2 = x_max + padding_x
+    base_crop_y2 = y_max + padding_y
+    
+    # Calculate crop dimensions
+    crop_width = base_crop_x2 - base_crop_x1
+    crop_height = base_crop_y2 - base_crop_y1
+    
+    # Add random translation if specified
+    if translation_ratio > 0:
+        # Calculate maximum translation based on face size
+        max_translation_x = bbox_width * translation_ratio
+        max_translation_y = bbox_height * translation_ratio
+        
+        # Generate random translation offsets
+        translation_x = random.uniform(-max_translation_x, max_translation_x)
+        translation_y = random.uniform(-max_translation_y, max_translation_y)
+        
+        # Apply translation
+        base_crop_x1 += translation_x
+        base_crop_y1 += translation_y
+        base_crop_x2 += translation_x
+        base_crop_y2 += translation_y
+    
+    # Ensure crop box stays within image boundaries
+    crop_x1 = max(0, int(base_crop_x1))
+    crop_y1 = max(0, int(base_crop_y1))
+    crop_x2 = min(img_width, int(base_crop_x2))
+    crop_y2 = min(img_height, int(base_crop_y2))
+    
+    # Crop the image
+    cropped_pil_image = pil_image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+    
+    # Adjust landmarks relative to the new crop region
+    adjusted_landmarks_np = landmarks_np.copy()
+    adjusted_landmarks_np[:, 0] -= crop_x1
+    adjusted_landmarks_np[:, 1] -= crop_y1
+    
+    return cropped_pil_image, adjusted_landmarks_np
+
 def apply_clahe(pil_image, clip_limit=2.0, tile_grid_size=(8,8)):
     """
     Applies CLAHE to the PIL image.

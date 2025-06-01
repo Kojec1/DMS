@@ -5,7 +5,7 @@ import torch
 from PIL import Image, ImageOps
 import torchvision.transforms.functional as TF
 import random
-from .augmentation import horizontal_flip, normalize_landmarks, crop_to_content, apply_clahe, random_affine_with_landmarks, landmarks_smoothing
+from .augmentation import horizontal_flip, normalize_landmarks, crop_to_content, apply_clahe, random_affine_with_landmarks, landmarks_smoothing, crop_to_landmarks
 
 class BaseDataset(Dataset):
     """Base PyTorch Dataset template. Custom datasets should inherit from this class."""
@@ -202,3 +202,431 @@ class MPIIFaceGazeDataset(BaseDataset):
 
         return item_to_return
 
+
+class WFLWDataset(BaseDataset):
+    """
+    WFLW (Wider Facial Landmarks in the Wild) Dataset
+    98 facial landmarks with attribute annotations
+
+    Landmarks:
+    - 60: Left outer eye
+    - 64: Left inner eye  
+    - 68: Right inner eye
+    - 72: Right outer eye
+    - 76: Left mouth
+    - 82 Right mouth
+    """
+    def __init__(self, annotation_file, images_dir, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, mpii_landmarks=False):
+        super().__init__(transform)
+        self.annotation_file = annotation_file
+        self.images_dir = images_dir
+        self.samples = []
+        self.is_train = is_train
+        self.affine_aug = affine_aug
+        self.flip_aug = flip_aug
+        self.use_cache = use_cache
+        self.label_smoothing = label_smoothing
+        self.mpii_landmarks = mpii_landmarks
+
+        if self.use_cache:
+            self.image_cache = {}
+            print("Image caching enabled for WFLWDataset.")
+        
+        self._load_annotations()
+
+    def _load_annotations(self):
+        if not os.path.exists(self.annotation_file):
+            raise FileNotFoundError(f"Annotation file not found: {self.annotation_file}")
+
+        with open(self.annotation_file, 'r') as f:
+            for line_idx, line in enumerate(f):
+                parts = line.strip().split(' ')
+                if len(parts) != 207:  # 196 + 4 + 6 + 1
+                    print(f"Warning: Malformed line {line_idx+1} in {self.annotation_file}. Expected 207 parts, got {len(parts)}. Skipping.")
+                    continue
+
+                try:
+                    # 98 landmarks (196 coordinates)
+                    landmarks_coords = [float(p) for p in parts[:196]]
+                    landmarks = np.array(landmarks_coords, dtype=np.float32).reshape(98, 2)
+                    
+                    # Detection rectangle
+                    bbox = np.array([float(p) for p in parts[196:200]], dtype=np.float32)
+                    
+                    # Attributes
+                    pose = int(parts[200])
+                    expression = int(parts[201])
+                    illumination = int(parts[202])
+                    makeup = int(parts[203])
+                    occlusion = int(parts[204])
+                    blur = int(parts[205])
+                    
+                    # Image name
+                    image_name = parts[206]
+                    image_path = os.path.join(self.images_dir, image_name)
+                    
+                    if not os.path.exists(image_path):
+                        print(f"Warning: Image not found {image_path}. Skipping.")
+                        continue
+
+                    sample_data = {
+                        'image_path': image_path,
+                        'landmarks': landmarks,
+                        'bbox': bbox,
+                        'pose': pose,
+                        'expression': expression,
+                        'illumination': illumination,
+                        'makeup': makeup,
+                        'occlusion': occlusion,
+                        'blur': blur,
+                        'image_name': image_name
+                    }
+                    self.samples.append(sample_data)
+
+                except (ValueError, IndexError) as e:
+                    print(f"Warning: Error parsing line {line_idx+1} in {self.annotation_file}: {e}. Skipping.")
+                    continue
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        image_path = sample['image_path']
+        
+        landmarks = sample['landmarks'].copy()
+        bbox = sample['bbox'].copy()
+
+        if self.use_cache and image_path in self.image_cache:
+            image, landmarks = self.image_cache[image_path]
+            landmarks = landmarks.copy()
+        else:
+            image = Image.open(image_path).convert('L')
+            
+            # Crop based on bounding box
+            x_min, y_min, x_max, y_max = bbox
+            x_min, y_min, x_max, y_max = int(x_min), int(y_min), int(x_max), int(y_max)
+            
+            # Ensure bbox is within image bounds
+            img_width, img_height = image.size
+            x_min = max(0, x_min)
+            y_min = max(0, y_min)
+            x_max = min(img_width, x_max)
+            y_max = min(img_height, y_max)
+            
+            # Crop image
+            image = image.crop((x_min, y_min, x_max, y_max))
+            
+            # Adjust landmarks relative to cropped region
+            landmarks[:, 0] -= x_min
+            landmarks[:, 1] -= y_min
+            
+            # Apply CLAHE
+            image = apply_clahe(image)
+
+            if self.use_cache:
+                self.image_cache[image_path] = (image.copy(), landmarks.copy())
+
+        if image is None:
+            raise RuntimeError(f"Image object is None for sample {index} ({image_path}).")
+         
+        effective_width, effective_height = image.size 
+
+        # Affine Augmentation
+        if self.is_train and self.affine_aug and random.random() > 0.5:
+            image, landmarks = random_affine_with_landmarks(image, landmarks)
+
+        # Horizontal Flip
+        if self.is_train and self.flip_aug and random.random() > 0.5:
+            image, landmarks = horizontal_flip(image, landmarks, effective_width)
+            # WFLW landmark flipping indices (symmetric pairs)
+            flip_indices = [32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16,
+                           0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+                           46, 45, 44, 43, 42, 50, 49, 48, 47, 37, 36, 35, 34, 33, 41, 40, 39, 38,
+                           51, 52, 53, 54, 59, 58, 57, 56, 55, 72, 71, 70, 69, 68, 75, 74, 73, 60,
+                           61, 63, 62, 67, 66, 65, 64, 82, 81, 80, 79, 78, 77, 76, 87, 86, 85, 84, 83,
+                           92, 91, 90, 89, 88, 95, 94, 93, 97, 96]
+            landmarks = landmarks[flip_indices, :]
+
+        # Normalize landmarks
+        landmarks = normalize_landmarks(landmarks, effective_width, effective_height)
+
+        # Apply label smoothing
+        if self.is_train and self.label_smoothing > 0:
+            landmarks = landmarks_smoothing(landmarks, smoothing_factor=self.label_smoothing)
+
+        # Extract MPII-style landmarks if requested
+        if self.mpii_landmarks:
+            landmarks = landmarks[[60, 64, 68, 72, 76, 82], :]
+
+        item_to_return = {}
+        if self.transform:
+            item_to_return['image'] = self.transform(image)
+        else:
+            item_to_return['image'] = TF.to_tensor(image)
+
+        # Convert to tensors
+        item_to_return['landmarks'] = torch.from_numpy(landmarks.astype(np.float32))
+        item_to_return['bbox'] = torch.from_numpy(sample['bbox'])
+        item_to_return['pose'] = torch.tensor(sample['pose'], dtype=torch.long)
+        item_to_return['expression'] = torch.tensor(sample['expression'], dtype=torch.long)
+        item_to_return['illumination'] = torch.tensor(sample['illumination'], dtype=torch.long)
+        item_to_return['makeup'] = torch.tensor(sample['makeup'], dtype=torch.long)
+        item_to_return['occlusion'] = torch.tensor(sample['occlusion'], dtype=torch.long)
+        item_to_return['blur'] = torch.tensor(sample['blur'], dtype=torch.long)
+        
+        item_to_return['image_name'] = sample['image_name']
+        item_to_return['image_path'] = image_path
+
+        return item_to_return
+
+
+class Face300WDataset(BaseDataset):
+    """
+    300W (300 Faces In-the-Wild) Dataset
+    68 facial landmarks
+
+    Landmarks:
+    - 36: Left outer eye
+    - 39: Left inner eye
+    - 42: Right inner eye
+    - 45: Right outer eye
+    - 48: Left mouth
+    - 54: Right mouth
+    """
+    def __init__(self, root_dir, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, subset=None, mpii_landmarks=False, padding_ratio=0.3, translation_ratio=0.2, train_test_split=0.8, split='train', split_seed=42):
+        super().__init__(transform)
+        self.root_dir = root_dir
+        self.samples = []
+        self.is_train = is_train
+        self.affine_aug = affine_aug
+        self.flip_aug = flip_aug
+        self.use_cache = use_cache
+        self.label_smoothing = label_smoothing
+        self.subset = subset  # Can be 'indoor', 'outdoor', or None for both
+        self.mpii_landmarks = mpii_landmarks
+        self.padding_ratio = padding_ratio
+        self.translation_ratio = translation_ratio
+        self.train_test_split = train_test_split  # Ratio of training data (0.0 to 1.0)
+        self.split = split  # 'train' or 'test'
+        self.split_seed = split_seed  # Seed for reproducible splits
+        
+        if self.use_cache:
+            self.image_cache = {}
+            print("Image caching enabled for Face300WDataset.")
+        
+        self._load_annotations()
+
+    def _load_annotations(self):
+        # Define subdirectories to process
+        subdirs = []
+        if self.subset == 'indoor':
+            subdirs = ['01_Indoor']
+        elif self.subset == 'outdoor':
+            subdirs = ['02_Outdoor']
+        else:
+            subdirs = ['01_Indoor', '02_Outdoor']
+
+        all_samples = []  # Collect all samples first, then split
+        
+        for subdir in subdirs:
+            subdir_path = os.path.join(self.root_dir, subdir)
+            if not os.path.exists(subdir_path):
+                print(f"Warning: Subdirectory not found {subdir_path}. Skipping.")
+                continue
+
+            # Find all .pts files in the subdirectory
+            pts_files = [f for f in os.listdir(subdir_path) if f.endswith('.pts')]
+            
+            for pts_file in pts_files:
+                pts_path = os.path.join(subdir_path, pts_file)
+                
+                # Corresponding image file (.png)
+                image_file = pts_file.replace('.pts', '.png')
+                image_path = os.path.join(subdir_path, image_file)
+                
+                if not os.path.exists(image_path):
+                    print(f"Warning: Image file not found {image_path}. Skipping.")
+                    continue
+
+                try:
+                    landmarks = self._parse_pts_file(pts_path)
+                    if landmarks is None:
+                        continue
+
+                    sample_data = {
+                        'image_path': image_path,
+                        'landmarks': landmarks,
+                        'subset': subdir,
+                        'image_name': image_file
+                    }
+                    all_samples.append(sample_data)
+
+                except Exception as e:
+                    print(f"Warning: Error processing {pts_path}: {e}. Skipping.")
+                    continue
+
+        print(f"Loaded {len(all_samples)} total samples from 300W dataset.")
+        
+        # Perform train/test split
+        if len(all_samples) == 0:
+            print("Warning: No samples found to split.")
+            self.samples = []
+            return
+            
+        # Set random seed for reproducible splits
+        import random
+        random.seed(self.split_seed)
+        
+        # Shuffle samples to ensure random distribution
+        all_samples_copy = all_samples.copy()
+        random.shuffle(all_samples_copy)
+        
+        # Calculate split index
+        n_total = len(all_samples_copy)
+        n_train = int(n_total * self.train_test_split)
+        
+        # Split samples
+        if self.split == 'train':
+            self.samples = all_samples_copy[:n_train]
+            print(f"Using {len(self.samples)} samples for training (split ratio: {self.train_test_split:.2f})")
+        elif self.split == 'test':
+            self.samples = all_samples_copy[n_train:]
+            print(f"Using {len(self.samples)} samples for testing (split ratio: {1-self.train_test_split:.2f})")
+        else:
+            raise ValueError(f"Invalid split value: {self.split}. Must be 'train' or 'test'.")
+            
+        if len(self.samples) == 0:
+            print(f"Warning: No samples in {self.split} split. Consider adjusting train_test_split ratio.")
+        
+        # Reset random seed to avoid affecting other random operations
+        random.seed()
+
+    def _parse_pts_file(self, pts_path):
+        """Parse a .pts annotation file and return landmarks as numpy array."""
+        try:
+            with open(pts_path, 'r') as f:
+                lines = f.readlines()
+
+            # Find the line with n_points
+            n_points = None
+            start_idx = None
+            
+            for i, line in enumerate(lines):
+                line = line.strip()
+                if line.startswith('n_points:'):
+                    n_points = int(line.split(':')[1].strip())
+                elif line == '{':
+                    start_idx = i + 1
+                    break
+
+            if n_points is None or start_idx is None:
+                print(f"Warning: Could not parse header in {pts_path}")
+                return None
+
+            if n_points != 68:
+                print(f"Warning: Expected 68 points, got {n_points} in {pts_path}")
+                return None
+
+            # Read landmark coordinates
+            landmarks = []
+            for i in range(start_idx, start_idx + n_points):
+                if i >= len(lines):
+                    print(f"Warning: Not enough coordinate lines in {pts_path}")
+                    return None
+                
+                line = lines[i].strip()
+                if line == '}':
+                    break
+                
+                coords = line.split()
+                if len(coords) != 2:
+                    print(f"Warning: Invalid coordinate format in {pts_path}: {line}")
+                    return None
+                
+                x, y = float(coords[0]), float(coords[1])
+                landmarks.append([x, y])
+
+            if len(landmarks) != n_points:
+                print(f"Warning: Expected {n_points} landmarks, got {len(landmarks)} in {pts_path}")
+                return None
+
+            return np.array(landmarks, dtype=np.float32)
+
+        except Exception as e:
+            print(f"Error parsing {pts_path}: {e}")
+            return None
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        image_path = sample['image_path']
+        
+        landmarks = sample['landmarks'].copy()
+
+        if self.use_cache and image_path in self.image_cache:
+            image, landmarks = self.image_cache[image_path]
+            landmarks = landmarks.copy()
+        else:
+            image = Image.open(image_path).convert('L')
+
+            # Crop to face region based on landmarks with padding and optional random translation
+            translation_ratio = self.translation_ratio if self.is_train else 0.0
+            image, landmarks = crop_to_landmarks(image, landmarks, 
+                                               padding_ratio=self.padding_ratio,
+                                               translation_ratio=translation_ratio)
+            
+            # Apply CLAHE
+            image = apply_clahe(image)
+
+            if self.use_cache:
+                self.image_cache[image_path] = (image.copy(), landmarks.copy())
+
+        if image is None:
+            raise RuntimeError(f"Image object is None for sample {index} ({image_path}).")
+         
+        effective_width, effective_height = image.size 
+
+        # Affine Augmentation
+        if self.is_train and self.affine_aug and random.random() > 0.5:
+            image, landmarks = random_affine_with_landmarks(image, landmarks)
+
+        # Horizontal Flip
+        if self.is_train and self.flip_aug and random.random() > 0.5:
+            image, landmarks = horizontal_flip(image, landmarks, effective_width)
+            # 68-point landmark flipping indices (iBUG 68-point standard)
+            flip_indices = [16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+                           26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
+                           27, 28, 29, 30,
+                           35, 34, 33, 32, 31,
+                           45, 44, 43, 42, 47, 46, 39, 38, 37, 36, 41, 40,
+                           54, 53, 52, 51, 50, 49, 48,
+                           59, 58, 57, 56, 55, 64, 63, 62, 61, 60, 67, 66, 65]
+            landmarks = landmarks[flip_indices, :]
+
+        # Normalize landmarks
+        landmarks = normalize_landmarks(landmarks, effective_width, effective_height)
+
+        # Apply label smoothing
+        if self.is_train and self.label_smoothing > 0:
+            landmarks = landmarks_smoothing(landmarks, smoothing_factor=self.label_smoothing)
+
+        # Extract MPII-style landmarks if requested
+        if self.mpii_landmarks:
+            landmarks = landmarks[[36, 39, 42, 45, 48, 54], :]
+
+        item_to_return = {}
+        if self.transform:
+            item_to_return['image'] = self.transform(image)
+        else:
+            item_to_return['image'] = TF.to_tensor(image)
+
+        # Convert to tensors
+        item_to_return['landmarks'] = torch.from_numpy(landmarks.astype(np.float32))
+        item_to_return['subset'] = sample['subset']
+        item_to_return['image_name'] = sample['image_name']
+        item_to_return['image_path'] = image_path
+
+        return item_to_return
