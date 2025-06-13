@@ -7,14 +7,21 @@ import cv2
 import math
 
 
-def horizontal_flip(image, landmarks_np, effective_width):
+def horizontal_flip(image, landmarks_np, gaze_2d_angles_np, effective_width):
     """
-    Horizontally flips the image and adjusts landmarks accordingly.
+    Horizontally flips the image and adjusts landmarks and gaze yaw accordingly.
     """
     flipped_image = TF.hflip(image)
+    
+    # Flip landmarks
     flipped_landmarks_np = landmarks_np.copy()
     flipped_landmarks_np[:, 0] = effective_width - flipped_landmarks_np[:, 0]
-    return flipped_image, flipped_landmarks_np
+    
+    # Flip gaze yaw
+    flipped_gaze_np = gaze_2d_angles_np.copy()
+    flipped_gaze_np[1] *= -1 # Negate yaw (index 1)
+
+    return flipped_image, flipped_landmarks_np, flipped_gaze_np
 
 def normalize_landmarks(landmarks_np, effective_width, effective_height):
     """
@@ -75,9 +82,10 @@ def apply_clahe(pil_image, clip_limit=2.0, tile_grid_size=(8,8)):
     clahe_pil_image = Image.fromarray(cl_img_np)
     return clahe_pil_image 
 
-def random_affine_with_landmarks(image, landmarks_np, degrees=(-20, 20), translate_fractions=(0.1, 0.1), scale_range=(0.8, 1.2)):
+def random_affine_with_landmarks(image, landmarks_np, gaze_2d_angles_np, degrees=(-20, 20), translate_fractions=(0.1, 0.1), scale_range=(0.8, 1.2)):
     """
-    Applies random affine transformation (rotation, translation, scale) to the image and adjusts landmarks accordingly.
+    Applies random affine transformation (rotation, translation, scale) to the image 
+    and adjusts landmarks and gaze yaw accordingly.
     """
     original_width, original_height = image.size
     center_x, center_y = original_width / 2.0, original_height / 2.0
@@ -125,11 +133,31 @@ def random_affine_with_landmarks(image, landmarks_np, degrees=(-20, 20), transla
     adjusted_landmarks[:, 0] += center_x + translate_x
     adjusted_landmarks[:, 1] += center_y + translate_y
     
+    # Adjust gaze by applying the 3D rotation corresponding to the 2D image rotation
+    adjusted_gaze_np = gaze_2d_angles_np.copy()
+    pitch, yaw = adjusted_gaze_np[0], adjusted_gaze_np[1]
+    
+    # Convert original (pitch, yaw) to a 3D vector.
+    x = -math.cos(pitch) * math.sin(yaw)
+    y = -math.sin(pitch)
+    z = -math.cos(pitch) * math.cos(yaw)
+    
+    x_new = x * cos_a - y * sin_a
+    y_new = x * sin_a + y * cos_a
+    z_new = z
+    
+    # Convert the new 3D vector back to (pitch, yaw) format.
+    new_pitch = math.asin(np.clip(-y_new, -1.0, 1.0))
+    new_yaw = math.atan2(-x_new, -z_new)    
+    
+    adjusted_gaze_np[0] = new_pitch
+    adjusted_gaze_np[1] = new_yaw
+    
     # Clip landmarks to be within the image dimensions
     adjusted_landmarks[:, 0] = np.clip(adjusted_landmarks[:, 0], 0, original_width - 1)
     adjusted_landmarks[:, 1] = np.clip(adjusted_landmarks[:, 1], 0, original_height - 1)
 
-    return transformed_image, adjusted_landmarks
+    return transformed_image, adjusted_landmarks, adjusted_gaze_np
 
 def landmarks_smoothing(landmarks_np, smoothing_factor=0.01, landmark_bounds=(0.0, 1.0)):
     """
