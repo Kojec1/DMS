@@ -94,11 +94,9 @@ class MPIIFaceGazeDataset(BaseDataset):
                             # Handle zero vector case for gaze direction
                             pitch = 0.0
                             yaw = 0.0
-                            # normalized_gaze_vec = np.array([0,0,-1], dtype=np.float32) # Default forward gaze if needed elsewhere
                         else:
                             normalized_gaze_vec = gaze_direction_cam_3d / norm_gaze_direction_val
                             # Pitch (vertical angle)
-                            # Clamp asin argument to [-1, 1] to prevent domain errors from float precision issues
                             asin_arg = np.clip(-normalized_gaze_vec[1], -1.0, 1.0)
                             pitch = np.arcsin(asin_arg)
                             # Yaw (horizontal angle)
