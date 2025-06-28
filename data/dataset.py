@@ -94,11 +94,9 @@ class MPIIFaceGazeDataset(BaseDataset):
                             # Handle zero vector case for gaze direction
                             pitch = 0.0
                             yaw = 0.0
-                            # normalized_gaze_vec = np.array([0,0,-1], dtype=np.float32) # Default forward gaze if needed elsewhere
                         else:
                             normalized_gaze_vec = gaze_direction_cam_3d / norm_gaze_direction_val
                             # Pitch (vertical angle)
-                            # Clamp asin argument to [-1, 1] to prevent domain errors from float precision issues
                             asin_arg = np.clip(-normalized_gaze_vec[1], -1.0, 1.0)
                             pitch = np.arcsin(asin_arg)
                             # Yaw (horizontal angle)
@@ -135,8 +133,9 @@ class MPIIFaceGazeDataset(BaseDataset):
         sample = self.samples[index]
         image_path = sample['image_path']
         
-        # Make a fresh copy of landmarks from metadata each time, as they might be modified by augmentations
+        # Make a fresh copy of landmarks and gaze angles from metadata each time
         landmarks = sample['facial_landmarks'].copy()
+        gaze_angles = sample['gaze_2d_angles'].copy()
 
         image = None
 
@@ -162,11 +161,11 @@ class MPIIFaceGazeDataset(BaseDataset):
 
         # Affine Augmentation (if training)
         if self.is_train and self.affine_aug and random.random() > 0.5:
-            image, landmarks = random_affine_with_landmarks(image, landmarks)
+            image, landmarks, gaze_angles = random_affine_with_landmarks(image, landmarks, gaze_angles)
 
         # Horizontal Flip (if training)
         if self.is_train and self.flip_aug and random.random() > 0.5:
-            image, landmarks = horizontal_flip(image, landmarks, effective_width)
+            image, landmarks, gaze_angles = horizontal_flip(image, landmarks, gaze_angles, effective_width)
             # Swap landmark indices after horizontal flip
             # Original: 0:L_outer, 1:L_inner, 2:R_inner, 3:R_outer, 4:L_mouth, 5:R_mouth
             # Flipped:  0:R_outer, 1:R_inner, 2:L_inner, 3:L_outer, 4:R_mouth, 5:L_mouth
@@ -194,7 +193,7 @@ class MPIIFaceGazeDataset(BaseDataset):
         item_to_return['face_center_cam'] = torch.from_numpy(sample['face_center_cam'])
         item_to_return['gaze_target_cam'] = torch.from_numpy(sample['gaze_target_cam'])
         item_to_return['gaze_direction_cam_3d'] = torch.from_numpy(sample['gaze_direction_cam_3d'])
-        item_to_return['gaze_2d_angles'] = torch.from_numpy(sample['gaze_2d_angles'])
+        item_to_return['gaze_2d_angles'] = torch.from_numpy(gaze_angles.astype(np.float32))
         
         # Non-tensor data
         item_to_return['eval_eye'] = sample['eval_eye'] # String

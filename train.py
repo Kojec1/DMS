@@ -8,7 +8,7 @@ import argparse
 import time
 from tqdm import tqdm
 
-from nn.modules.facial_landmark_estimator import FacialLandmarkEstimator
+from nn.modules.model import MHModel
 from nn.loss import SmoothWingLoss
 from nn.metrics import NME
 from data.dataset import MPIIFaceGazeDataset, WFLWDataset, Face300WDataset
@@ -33,7 +33,7 @@ def get_args():
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--lr_final', type=float, default=1e-6, help='Final learning rate for linear scheduler')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay for optimizer')
-    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints_fpe', help='Directory to save checkpoints')
+    parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints_mh', help='Directory to save checkpoints')
     parser.add_argument('--checkpoint_freq', type=int, default=10, help='Frequency (in epochs) to save checkpoints. Best model is always saved.')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--log_interval', type=int, default=10, help='Interval for logging training status (batches)')
@@ -57,9 +57,15 @@ def get_args():
     parser.add_argument('--use_cache', action='store_true', help='Use cached images and landmarks')
 
     # Warmup arguments
-    parser.add_argument('--warmup_epochs', type=int, default=0, help='Number of epochs for warmup phase')
-    parser.add_argument('--warmup_lr', type=float, default=1e-3, help='Learning rate during warmup phase')
-    parser.add_argument('--freeze_backbone_warmup', action='store_true', help='Freeze backbone weights during warmup phase')
+    parser.add_argument('--warmup_epochs', type=int, default=0, help='Number of epochs for warmup phase.')
+    parser.add_argument('--warmup_lr', type=float, default=1e-3, help='Learning rate during warmup phase.')
+    parser.add_argument('--freeze_backbone_warmup', action='store_true', help='Freeze backbone weights during warmup phase.')
+    
+    # Training Mode arguments
+    parser.add_argument('--training_mode', type=str, default='both', choices=['landmarks', 'gaze', 'both'], help='Training mode: landmarks, gaze, or both.')
+    parser.add_argument('--landmark_loss_weight', type=float, default=1.0, help='Weight for landmark loss component.')
+    parser.add_argument('--gaze_loss_weight', type=float, default=1.0, help='Weight for gaze loss component.')
+
 
     # MPII-specific arguments
     parser.add_argument('--train_participant_ids', type=str, default="0,1,2,3,4,5,6,7,8,9,10,11", 
@@ -97,11 +103,14 @@ def get_args():
 
 
 # Training and Validation
-def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epoch, args, landmark_key):
+def train_one_epoch(model, dataloader, landmark_criterion, gaze_criterion, optimizer, scaler, device, epoch, args, landmark_key):
     model.train()
-    loss_accumulator = torch.tensor(0.0, device=device)
-    nme_accumulator = torch.tensor(0.0, device=device)
-    mse_accumulator = torch.tensor(0.0, device=device)
+    total_loss_accumulator = torch.tensor(0.0, device=device)
+    landmark_loss_accumulator = torch.tensor(0.0, device=device)
+    gaze_loss_accumulator = torch.tensor(0.0, device=device)
+    landmark_nme_accumulator = torch.tensor(0.0, device=device)
+    gaze_mse_accumulator = torch.tensor(0.0, device=device)
+    gaze_mae_accumulator = torch.tensor(0.0, device=device)
     start_time = time.time()
 
     for batch_idx, batch_data in tqdm(enumerate(dataloader), total=len(dataloader), desc="Training"):
@@ -109,85 +118,155 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scaler, device, epo
         gt_landmarks_flat = batch_data[landmark_key].to(device, non_blocking=True).view(images.size(0), -1)
         gt_landmarks_reshaped = batch_data[landmark_key].to(device, non_blocking=True)
         
+        gt_gaze = None
+        if args.training_mode in ['gaze', 'both']:
+            gt_gaze = batch_data['gaze_2d_angles'].to(device, non_blocking=True)
+
         optimizer.zero_grad(set_to_none=True)
         
+        with torch.amp.autocast(device_type='cuda', enabled=args.amp):
+            pred_landmarks, pred_gaze = model(images)
+
+            # Calculate total loss based on training mode
+            total_loss = torch.tensor(0.0, device=device)
+
+            landmark_loss = torch.tensor(0.0, device=device)
+            if args.training_mode in ['landmarks', 'both']:
+                landmark_loss = landmark_criterion(pred_landmarks, gt_landmarks_flat)
+                total_loss += args.landmark_loss_weight * landmark_loss
+
+            gaze_loss = torch.tensor(0.0, device=device)
+            if args.training_mode in ['gaze', 'both']:
+                gaze_loss = gaze_criterion(pred_gaze, gt_gaze)
+                total_loss += args.gaze_loss_weight * gaze_loss
+
         if args.amp:
-            with torch.amp.autocast(device_type='cuda'):
-                outputs_flat = model(images)
-                loss = criterion(outputs_flat, gt_landmarks_flat)
-            scaler.scale(loss).backward()
+            scaler.scale(total_loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            outputs_flat = model(images)
-            loss = criterion(outputs_flat, gt_landmarks_flat)
-            loss.backward()
+            total_loss.backward()
             optimizer.step()
         
-        loss_accumulator += loss.detach()
+        total_loss_accumulator += total_loss.detach()
+        landmark_loss_accumulator += landmark_loss.detach()
+        gaze_loss_accumulator += gaze_loss.detach()
 
-        # Calculate NME and MSE
-        outputs_reshaped = outputs_flat.detach().view(outputs_flat.size(0), -1, 2)
+        # Calculate metrics
+        pred_landmarks_reshaped = pred_landmarks.detach().view(pred_landmarks.size(0), -1, 2)
         
-        current_nme = NME(outputs_reshaped, gt_landmarks_reshaped, left_eye_idx=args.left_eye_idx, right_eye_idx=args.right_eye_idx)
-        nme_accumulator += current_nme.detach()
+        # Landmark NME - outer eye corner landmarks have indices 0 and 3
+        current_nme = NME(pred_landmarks_reshaped, gt_landmarks_reshaped, left_eye_idx=0, right_eye_idx=3)
+        landmark_nme_accumulator += current_nme.detach()
 
-        # MSE
-        current_mse = torch.nn.functional.mse_loss(outputs_flat.detach(), gt_landmarks_flat)
-        mse_accumulator += current_mse.detach()
+        # Gaze MSE
+        current_gaze_mse = torch.tensor(0.0, device=device)
+        if args.training_mode in ['gaze', 'both']:
+            current_gaze_mse = torch.nn.functional.mse_loss(pred_gaze.detach(), gt_gaze)
+        gaze_mse_accumulator += current_gaze_mse.detach()
+        
+        # Gaze MAE
+        current_gaze_mae = torch.tensor(0.0, device=device)
+        if args.training_mode in ['gaze', 'both']:
+            current_gaze_mae = torch.nn.functional.l1_loss(pred_gaze.detach(), gt_gaze)
+        gaze_mae_accumulator += current_gaze_mae.detach()
 
         # Log training progress
         if (batch_idx + 1) % args.log_interval == 0 or batch_idx == len(dataloader) -1:
-            current_loss = loss.item()
-            avg_epoch_loss = loss_accumulator.item() / (batch_idx + 1)
-            avg_epoch_nme = nme_accumulator.item() / (batch_idx + 1)
-            avg_epoch_mse = mse_accumulator.item() / (batch_idx + 1)
+            avg_total_loss = total_loss_accumulator.item() / (batch_idx + 1)
+            avg_landmark_loss = landmark_loss_accumulator.item() / (batch_idx + 1)
+            avg_gaze_loss = gaze_loss_accumulator.item() / (batch_idx + 1)
+            avg_nme = landmark_nme_accumulator.item() / (batch_idx + 1)
+            avg_gaze_mse = gaze_mse_accumulator.item() / (batch_idx + 1)
+            avg_gaze_mae = gaze_mae_accumulator.item() / (batch_idx + 1)
             elapsed_time = time.time() - start_time
             print(f'Epoch [{epoch+1}/{args.epochs}], Step [{batch_idx+1}/{len(dataloader)}], '
-                  f'Loss: {current_loss:.6f} (Avg Epoch: {avg_epoch_loss:.6f}), '
-                  f'NME: {current_nme.item():.6f} (Avg Epoch: {avg_epoch_nme:.6f}), '
-                  f'MSE: {current_mse.item():.6f} (Avg Epoch: {avg_epoch_mse:.6f}), Time: {elapsed_time:.2f}s')
+                  f'Total Loss: {total_loss.item():.4f} (Avg: {avg_total_loss:.4f}), '
+                  f'Lmk Loss: {landmark_loss.item():.4f} (Avg: {avg_landmark_loss:.4f}), '
+                  f'Gaze Loss: {gaze_loss.item():.4f} (Avg: {avg_gaze_loss:.4f}), '
+                  f'Lmk NME: {current_nme.item():.4f} (Avg: {avg_nme:.4f}), '
+                  f'Gaze MSE: {current_gaze_mse.item():.4f} (Avg: {avg_gaze_mse:.4f}), '
+                  f'Gaze MAE: {current_gaze_mae.item():.4f} (Avg: {avg_gaze_mae:.4f}), '
+                  f'Time: {elapsed_time:.2f}s')
             start_time = time.time() # Reset timer for next log interval reporting
             
-    avg_loss = (loss_accumulator / len(dataloader)).item()
-    avg_nme = (nme_accumulator / len(dataloader)).item()
-    avg_mse = (mse_accumulator / len(dataloader)).item()
+    avg_total_loss = (total_loss_accumulator / len(dataloader)).item()
+    avg_landmark_loss = (landmark_loss_accumulator / len(dataloader)).item()
+    avg_gaze_loss = (gaze_loss_accumulator / len(dataloader)).item()
+    avg_nme = (landmark_nme_accumulator / len(dataloader)).item()
+    avg_gaze_mse = (gaze_mse_accumulator / len(dataloader)).item()
+    avg_gaze_mae = (gaze_mae_accumulator / len(dataloader)).item()
 
-    return avg_loss, avg_nme, avg_mse
+    return avg_total_loss, avg_landmark_loss, avg_gaze_loss, avg_nme, avg_gaze_mse, avg_gaze_mae
 
-def validate(model, dataloader, criterion, device, args, landmark_key):
+def validate(model, dataloader, landmark_criterion, gaze_criterion, device, args, landmark_key):
     model.eval()
-    loss_accumulator = torch.tensor(0.0, device=device)
-    nme_accumulator = torch.tensor(0.0, device=device)
-    mse_accumulator = torch.tensor(0.0, device=device)
+    total_loss_accumulator = torch.tensor(0.0, device=device)
+    landmark_loss_accumulator = torch.tensor(0.0, device=device)
+    gaze_loss_accumulator = torch.tensor(0.0, device=device)
+    landmark_nme_accumulator = torch.tensor(0.0, device=device)
+    gaze_mse_accumulator = torch.tensor(0.0, device=device)
+    gaze_mae_accumulator = torch.tensor(0.0, device=device)
 
     with torch.no_grad():
         for batch_data in tqdm(dataloader, total=len(dataloader), desc="Validating"):
             images = batch_data['image'].to(device, non_blocking=True)
             gt_landmarks_flat = batch_data[landmark_key].to(device, non_blocking=True).view(images.size(0), -1)
             gt_landmarks_reshaped = batch_data[landmark_key].to(device, non_blocking=True)
+
+            gt_gaze = None
+            if args.training_mode in ['gaze', 'both']:
+                gt_gaze = batch_data['gaze_2d_angles'].to(device, non_blocking=True)
             
             with torch.amp.autocast(device_type='cuda', enabled=args.amp):
-                outputs_flat = model(images)
-                loss = criterion(outputs_flat, gt_landmarks_flat)
+                pred_landmarks, pred_gaze = model(images)
+                                    
+                # Calculate total loss based on training mode
+                total_loss = torch.tensor(0.0, device=device)
+
+                landmark_loss = torch.tensor(0.0, device=device)
+                if args.training_mode in ['landmarks', 'both']:
+                    landmark_loss = landmark_criterion(pred_landmarks, gt_landmarks_flat)
+                    total_loss += args.landmark_loss_weight * landmark_loss
+
+                gaze_loss = torch.tensor(0.0, device=device)
+                if args.training_mode in ['gaze', 'both']:
+                    gaze_loss = gaze_criterion(pred_gaze, gt_gaze)
+                    total_loss += args.gaze_loss_weight * gaze_loss
                 
-            loss_accumulator += loss.detach()
+            total_loss_accumulator += total_loss.detach()
+            landmark_loss_accumulator += landmark_loss.detach()
+            gaze_loss_accumulator += gaze_loss.detach()
 
-            # Calculate NME and MSE
-            outputs_reshaped = outputs_flat.detach().view(outputs_flat.size(0), -1, 2)
+            # Calculate metrics
+            pred_landmarks_reshaped = pred_landmarks.detach().view(pred_landmarks.size(0), -1, 2)
             
-            current_nme = NME(outputs_reshaped, gt_landmarks_reshaped, left_eye_idx=args.left_eye_idx, right_eye_idx=args.right_eye_idx)
-            nme_accumulator += current_nme.detach()
+            # Landmark NME - outer eye corner landmarks have indices 0 and 3
+            current_nme = NME(pred_landmarks_reshaped, gt_landmarks_reshaped, left_eye_idx=0, right_eye_idx=3)
+            landmark_nme_accumulator += current_nme.detach()
 
-            current_mse = torch.nn.functional.mse_loss(outputs_flat.detach(), gt_landmarks_flat)
-            mse_accumulator += current_mse.detach()
+            # Gaze metrics if applicable
+            if args.training_mode in ['gaze', 'both']:
+                # Gaze MSE
+                current_gaze_mse = torch.nn.functional.mse_loss(pred_gaze.detach(), gt_gaze)
+                gaze_mse_accumulator += current_gaze_mse.detach()
+                
+                # Gaze MAE
+                current_gaze_mae = torch.nn.functional.l1_loss(pred_gaze.detach(), gt_gaze)
+                gaze_mae_accumulator += current_gaze_mae.detach()
             
-    avg_loss = (loss_accumulator / len(dataloader)).item()
-    avg_nme = (nme_accumulator / len(dataloader)).item()
-    avg_mse = (mse_accumulator / len(dataloader)).item()
-    print(f'Validation: Avg Loss: {avg_loss:.6f}, Avg NME: {avg_nme:.6f}, Avg MSE: {avg_mse:.6f}\n')
+    avg_total_loss = (total_loss_accumulator / len(dataloader)).item()
+    avg_landmark_loss = (landmark_loss_accumulator / len(dataloader)).item()
+    avg_gaze_loss = (gaze_loss_accumulator / len(dataloader)).item()
+    avg_nme = (landmark_nme_accumulator / len(dataloader)).item()
+    avg_gaze_mse = (gaze_mse_accumulator / len(dataloader)).item()
+    avg_gaze_mae = (gaze_mae_accumulator / len(dataloader)).item()
+    
+    print(f'Validation: Avg Total Loss: {avg_total_loss:.4f}, '
+          f'Avg Lmk Loss: {avg_landmark_loss:.4f}, Avg Gaze Loss: {avg_gaze_loss:.4f}, '
+          f'Avg NME: {avg_nme:.4f}, Avg Gaze MSE: {avg_gaze_mse:.4f}, Avg Gaze MAE: {avg_gaze_mae:.4f}\n')
 
-    return avg_loss, avg_nme, avg_mse
+    return avg_total_loss, avg_landmark_loss, avg_gaze_loss, avg_nme, avg_gaze_mse, avg_gaze_mae
 
 # Main Function
 def main():
@@ -202,6 +281,10 @@ def main():
         if not (0.0 < args.train_test_split < 1.0):
             print(f"Error: train_test_split must be between 0.0 and 1.0, got {args.train_test_split}")
             return
+    
+    if args.dataset != 'mpii' and args.training_mode in ['gaze', 'both']:
+        print(f"Warning: Gaze training is only supported for the MPII dataset. Switching mode to 'landmarks'.")
+        args.training_mode = 'landmarks'
     
     set_seed(args.seed)
     
@@ -377,28 +460,20 @@ def main():
     print(f"DataLoader settings: num_workers={args.num_workers}, prefetch_factor={args.prefetch_factor}, persistent_workers={persistent_workers}")
 
     # Model
-    model = FacialLandmarkEstimator(
+    model = MHModel(
         num_landmarks=args.num_landmarks, 
         pretrained_backbone=not args.no_pretrained_backbone,
         in_channels=args.input_channels,
         dropout_rate=args.dropout_rate
     ).to(device)
-    print(f"Model: FacialLandmarkEstimator initialized with {args.num_landmarks} landmarks and {args.input_channels} input channel(s).")
+    
+    print(f"Model: MHModel initialized with {args.num_landmarks} landmarks and {args.input_channels} input channel(s).")
     print(f"Backbone pretrained: {not args.no_pretrained_backbone}")
-
-    # Attempt to compile the model with torch.compile
-    # if hasattr(torch, 'compile'):
-    #     try:
-    #         print("Attempting to compile the model with torch.compile()...")
-    #         model = torch.compile(model)
-    #         print("Model compiled successfully.")
-    #     except Exception as e:
-    #         print(f"Failed to compile model: {e}. Proceeding without compilation.")
-    # else:
-    #     print("torch.compile not available. Proceeding without compilation (requires PyTorch 2.0+ for this feature).")
+    print(f"Training Mode: {args.training_mode.upper()} (Landmark Weight: {args.landmark_loss_weight}, Gaze Weight: {args.gaze_loss_weight})")
 
     # Loss and Optimizer
-    criterion = SmoothWingLoss() # Smooth Wing Loss for landmark regression
+    landmark_criterion = SmoothWingLoss() # Smooth Wing Loss for landmark regression
+    gaze_criterion = nn.MSELoss() # MSE for gaze regression
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
     # Learning Rate Scheduler - will be initialized considering warmup
@@ -424,12 +499,12 @@ def main():
     # Resume from Checkpoint
     start_epoch = 0
     history = {
-        'train_loss': [],
-        'val_loss': [],
-        'train_nme': [],
-        'val_nme': [],
-        'train_mse': [],
-        'val_mse': [],
+        'train_total_loss': [], 'val_total_loss': [],
+        'train_landmark_loss': [], 'val_landmark_loss': [],
+        'train_gaze_loss': [], 'val_gaze_loss': [],
+        'train_landmark_nme': [], 'val_landmark_nme': [],
+        'train_gaze_mse': [], 'val_gaze_mse': [],
+        'train_gaze_mae': [], 'val_gaze_mae': [],
         'lr': []
     }
     history_filepath = os.path.join(args.checkpoint_dir, 'training_history.json')
@@ -497,8 +572,8 @@ def main():
         
         history['lr'].append(optimizer.param_groups[0]['lr'])  # Record LR for the epoch
 
-        train_loss, train_nme, train_mse = train_one_epoch(model, train_loader, criterion, optimizer, scaler, device, epoch, args, landmark_key)
-        val_loss, val_nme, val_mse = validate(model, val_loader, criterion, device, args, landmark_key)
+        train_total_loss, train_lmk_loss, train_gaze_loss, train_nme, train_gaze_mse, train_gaze_mae = train_one_epoch(model, train_loader, landmark_criterion, gaze_criterion, optimizer, scaler, device, epoch, args, landmark_key)
+        val_total_loss, val_lmk_loss, val_gaze_loss, val_nme, val_gaze_mse, val_gaze_mae = validate(model, val_loader, landmark_criterion, gaze_criterion, device, args, landmark_key)
         
         # Step the scheduler if in main training phase (and scheduler exists)
         if not is_warmup_epoch and scheduler is not None:
@@ -508,12 +583,18 @@ def main():
         elif not is_warmup_epoch: # Main training but no scheduler (e.g. main_training_epochs <=0)
              print(f"Main Training (Epoch {epoch + 1 - args.warmup_epochs}/{main_training_epochs}). No scheduler. LR: {optimizer.param_groups[0]['lr']:.2e}")
 
-        history['train_loss'].append(train_loss)
-        history['val_loss'].append(val_loss)
-        history['train_nme'].append(train_nme)
-        history['val_nme'].append(val_nme)
-        history['train_mse'].append(train_mse)
-        history['val_mse'].append(val_mse)
+        history['train_total_loss'].append(train_total_loss)
+        history['val_total_loss'].append(val_total_loss)
+        history['train_landmark_loss'].append(train_lmk_loss)
+        history['val_landmark_loss'].append(val_lmk_loss)
+        history['train_gaze_loss'].append(train_gaze_loss)
+        history['val_gaze_loss'].append(val_gaze_loss)
+        history['train_landmark_nme'].append(train_nme)
+        history['val_landmark_nme'].append(val_nme)
+        history['train_gaze_mse'].append(train_gaze_mse)
+        history['val_gaze_mse'].append(val_gaze_mse)
+        history['train_gaze_mae'].append(train_gaze_mae)
+        history['val_gaze_mae'].append(val_gaze_mae)
         
         # Save checkpoint based on frequency or if it's the last epoch
         if (epoch + 1) % args.checkpoint_freq == 0 or (epoch + 1) == args.epochs:
@@ -522,15 +603,15 @@ def main():
             save_checkpoint(epoch, model, optimizer, scheduler, scaler if args.amp else None, checkpoint_path, args.num_landmarks, args.dataset)
             save_history(history, history_filepath)
         
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_total_loss < best_val_loss:
+            best_val_loss = val_total_loss
             best_checkpoint_path = os.path.join(args.checkpoint_dir, 'best_model.pth')
             # Pass scheduler to save_checkpoint
             save_checkpoint(epoch, model, optimizer, scheduler, scaler if args.amp else None, best_checkpoint_path, args.num_landmarks, args.dataset)
             save_history(history, history_filepath)
             print(f"New best validation loss: {best_val_loss:.6f}. Saved best model to {best_checkpoint_path}")
         
-        print(f"Epoch {epoch+1} Summary: Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}, Train NME: {train_nme:.6f}, Val NME: {val_nme:.6f}, Train MSE: {train_mse:.6f}, Val MSE: {val_mse:.6f}")
+        print(f"Epoch {epoch+1} Summary: Train Total Loss: {train_total_loss:.4f}, Val Total Loss: {val_total_loss:.4f}, Train NME: {train_nme:.4f}, Val NME: {val_nme:.4f}")
 
     print("Training finished.")
     print(f"Best validation loss: {best_val_loss:.6f}")
@@ -542,10 +623,7 @@ def main():
 
     # Plot training history
     plot_path = os.path.join(args.checkpoint_dir, 'training_history.png')
-    plot_training_history(history['train_loss'], history['val_loss'], 
-                          history['train_nme'], history['val_nme'],
-                          history['train_mse'], history['val_mse'],
-                          history['lr'], plot_path)
+    plot_training_history(history, plot_path)
     print(f"Training history plot saved to {plot_path}")
 
 
