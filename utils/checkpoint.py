@@ -3,15 +3,15 @@ import os
 import json
 
 
-def save_checkpoint(epoch, model, optimizer, scheduler, scaler, filepath):
+def save_checkpoint(epoch, model, optimizer, scheduler, scaler, filepath, num_landmarks=None, dataset=None):
     """
-    Saves a checkpoint of the model, optimizer, scheduler, and scaler.
-    """
+    Saves a checkpoint of the model, optimizer, scheduler, and scaler with model metadata.
+    """    
     print(f"Saving checkpoint to {filepath}")
     state = {
         'epoch': epoch,
         'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
     }
 
     # Get the state_dict from the original model if it was compiled
@@ -20,6 +20,13 @@ def save_checkpoint(epoch, model, optimizer, scheduler, scaler, filepath):
 
     if scaler is not None: # For AMP
         state['scaler_state_dict'] = scaler.state_dict()
+    
+    # Store model metadata
+    if num_landmarks is not None:
+        state['num_landmarks'] = num_landmarks
+    if dataset is not None:
+        state['dataset'] = dataset
+        
     torch.save(state, filepath)
 
 def load_checkpoint(filepath, model, optimizer, scheduler, scaler):
@@ -32,7 +39,7 @@ def load_checkpoint(filepath, model, optimizer, scheduler, scaler):
         start_epoch = checkpoint['epoch'] + 1
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if scheduler is not None and 'scheduler_state_dict' in checkpoint:
+        if scheduler is not None and 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict'] is not None:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         if scaler is not None and 'scaler_state_dict' in checkpoint:
             scaler.load_state_dict(checkpoint['scaler_state_dict'])

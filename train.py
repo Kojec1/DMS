@@ -11,7 +11,7 @@ from tqdm import tqdm
 from nn.modules.model import MHModel
 from nn.loss import SmoothWingLoss
 from nn.metrics import NME
-from data.dataset import MPIIFaceGazeDataset
+from data.dataset import MPIIFaceGazeDataset, WFLWDataset, Face300WDataset
 from utils.visualization import plot_training_history
 from utils.misc import set_seed, setup_device
 from utils.checkpoint import save_checkpoint, load_checkpoint, save_history, load_history
@@ -19,10 +19,14 @@ from utils.checkpoint import save_checkpoint, load_checkpoint, save_history, loa
 
 # Configuration
 def get_args():
-    parser = argparse.ArgumentParser(description='Multi-Head Model Training for Facial Landmarks and 2D Gaze Estimation')
-    parser.add_argument('--data_dir', type=str, required=True, help='Root directory for MPIIFaceGaze dataset (containing p00, p01, etc.)')
-    parser.add_argument('--num_landmarks', type=int, default=6, help='Number of facial landmarks (MPIIFaceGaze has 6)')
-    parser.add_argument('--img_size', type=int, default=224, help='Input image size (height and width) for ConvNeXt, e.g., 224')
+    parser = argparse.ArgumentParser(description='Facial Landmark Estimation Training')
+    parser.add_argument('--dataset', type=str, required=True, choices=['mpii', 'wflw', '300w'],
+                        help='Dataset to use: mpii for MPIIFaceGaze, wflw for WFLW, 300w for Face300W')
+    parser.add_argument('--data_dir', type=str, required=True, help='Root directory for dataset')
+    parser.add_argument('--annotation_file', type=str, 
+                        help='Annotation file path (required for WFLW)')
+    parser.add_argument('--num_landmarks', type=int, default=6, help='Number of facial landmarks')
+    parser.add_argument('--img_size', type=int, default=224, help='Input image size for ConvNeXt')
     parser.add_argument('--input_channels', type=int, default=1, choices=[1, 3], help='Number of input image channels (1 for grayscale, 3 for RGB)')
     parser.add_argument('--batch_size', type=int, default=32, help='Training batch size')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
@@ -63,17 +67,43 @@ def get_args():
     parser.add_argument('--gaze_loss_weight', type=float, default=1.0, help='Weight for gaze loss component.')
 
 
-    # Participant IDs for splitting data
+    # MPII-specific arguments
     parser.add_argument('--train_participant_ids', type=str, default="0,1,2,3,4,5,6,7,8,9,10,11", 
-                        help='Comma-separated list of participant IDs for training (e.g., from 0 to 14 for MPIIFaceGaze)')
+                        help='Comma-separated list of participant IDs for training (MPII only)')
     parser.add_argument('--val_participant_ids', type=str, default="12,13,14", 
-                        help='Comma-separated list of participant IDs for validation')
+                        help='Comma-separated list of participant IDs for validation (MPII only)')
+
+    # WFLW-specific arguments
+    parser.add_argument('--train_annotation_file', type=str,
+                        help='Training annotation file path (WFLW only)')
+    parser.add_argument('--val_annotation_file', type=str,
+                        help='Validation annotation file path (WFLW only)')
+    parser.add_argument('--mpii_landmarks', action='store_true',
+                        help='Extract MPII-style 6 landmarks from WFLW (WFLW only)')
+
+    # 300W-specific arguments
+    parser.add_argument('--subset', type=str, choices=['indoor', 'outdoor'], 
+                        help='Subset to load for 300W dataset (indoor/outdoor, default: both)')
+    parser.add_argument('--padding_ratio', type=float, default=0.3,
+                        help='Padding ratio for landmark-based cropping in 300W dataset (default: 0.3)')
+    parser.add_argument('--translation_ratio', type=float, default=0.2,
+                        help='Random translation ratio for landmark-based cropping in 300W dataset (default: 0.2)')
+    parser.add_argument('--train_test_split', type=float, default=0.8,
+                        help='Train/test split ratio for 300W dataset (default: 0.8 = 80% train, 20% test)')
+    parser.add_argument('--split_seed', type=int, default=42,
+                        help='Random seed for reproducible train/test splits in 300W dataset (default: 42)')
+
+    # NME calculation indices
+    parser.add_argument('--left_eye_idx', type=int, default=0,
+                        help='Index of left eye landmark for NME calculation')
+    parser.add_argument('--right_eye_idx', type=int, default=3,
+                        help='Index of right eye landmark for NME calculation')
 
     return parser.parse_args()
 
 
 # Training and Validation
-def train_one_epoch(model, dataloader, landmark_criterion, gaze_criterion, optimizer, scaler, device, epoch, args):
+def train_one_epoch(model, dataloader, landmark_criterion, gaze_criterion, optimizer, scaler, device, epoch, args, landmark_key):
     model.train()
     total_loss_accumulator = torch.tensor(0.0, device=device)
     landmark_loss_accumulator = torch.tensor(0.0, device=device)
@@ -85,24 +115,29 @@ def train_one_epoch(model, dataloader, landmark_criterion, gaze_criterion, optim
 
     for batch_idx, batch_data in tqdm(enumerate(dataloader), total=len(dataloader), desc="Training"):
         images = batch_data['image'].to(device, non_blocking=True)
-        gt_landmarks_flat = batch_data['facial_landmarks'].to(device, non_blocking=True).view(images.size(0), -1)
-        gt_landmarks_reshaped = batch_data['facial_landmarks'].to(device, non_blocking=True)
-        gt_gaze = batch_data['gaze_2d_angles'].to(device, non_blocking=True)
+        gt_landmarks_flat = batch_data[landmark_key].to(device, non_blocking=True).view(images.size(0), -1)
+        gt_landmarks_reshaped = batch_data[landmark_key].to(device, non_blocking=True)
         
+        gt_gaze = None
+        if args.training_mode in ['gaze', 'both']:
+            gt_gaze = batch_data['gaze_2d_angles'].to(device, non_blocking=True)
+
         optimizer.zero_grad(set_to_none=True)
         
         with torch.amp.autocast(device_type='cuda', enabled=args.amp):
             pred_landmarks, pred_gaze = model(images)
-            
-            # Calculate individual losses
-            landmark_loss = landmark_criterion(pred_landmarks, gt_landmarks_flat)
-            gaze_loss = gaze_criterion(pred_gaze, gt_gaze)
-            
+
             # Calculate total loss based on training mode
             total_loss = torch.tensor(0.0, device=device)
+
+            landmark_loss = torch.tensor(0.0, device=device)
             if args.training_mode in ['landmarks', 'both']:
+                landmark_loss = landmark_criterion(pred_landmarks, gt_landmarks_flat)
                 total_loss += args.landmark_loss_weight * landmark_loss
+
+            gaze_loss = torch.tensor(0.0, device=device)
             if args.training_mode in ['gaze', 'both']:
+                gaze_loss = gaze_criterion(pred_gaze, gt_gaze)
                 total_loss += args.gaze_loss_weight * gaze_loss
 
         if args.amp:
@@ -125,11 +160,15 @@ def train_one_epoch(model, dataloader, landmark_criterion, gaze_criterion, optim
         landmark_nme_accumulator += current_nme.detach()
 
         # Gaze MSE
-        current_gaze_mse = torch.nn.functional.mse_loss(pred_gaze.detach(), gt_gaze)
+        current_gaze_mse = torch.tensor(0.0, device=device)
+        if args.training_mode in ['gaze', 'both']:
+            current_gaze_mse = torch.nn.functional.mse_loss(pred_gaze.detach(), gt_gaze)
         gaze_mse_accumulator += current_gaze_mse.detach()
         
         # Gaze MAE
-        current_gaze_mae = torch.nn.functional.l1_loss(pred_gaze.detach(), gt_gaze)
+        current_gaze_mae = torch.tensor(0.0, device=device)
+        if args.training_mode in ['gaze', 'both']:
+            current_gaze_mae = torch.nn.functional.l1_loss(pred_gaze.detach(), gt_gaze)
         gaze_mae_accumulator += current_gaze_mae.detach()
 
         # Log training progress
@@ -160,7 +199,7 @@ def train_one_epoch(model, dataloader, landmark_criterion, gaze_criterion, optim
 
     return avg_total_loss, avg_landmark_loss, avg_gaze_loss, avg_nme, avg_gaze_mse, avg_gaze_mae
 
-def validate(model, dataloader, landmark_criterion, gaze_criterion, device, args):
+def validate(model, dataloader, landmark_criterion, gaze_criterion, device, args, landmark_key):
     model.eval()
     total_loss_accumulator = torch.tensor(0.0, device=device)
     landmark_loss_accumulator = torch.tensor(0.0, device=device)
@@ -172,22 +211,27 @@ def validate(model, dataloader, landmark_criterion, gaze_criterion, device, args
     with torch.no_grad():
         for batch_data in tqdm(dataloader, total=len(dataloader), desc="Validating"):
             images = batch_data['image'].to(device, non_blocking=True)
-            gt_landmarks_flat = batch_data['facial_landmarks'].to(device, non_blocking=True).view(images.size(0), -1)
-            gt_landmarks_reshaped = batch_data['facial_landmarks'].to(device, non_blocking=True)
-            gt_gaze = batch_data['gaze_2d_angles'].to(device, non_blocking=True)
+            gt_landmarks_flat = batch_data[landmark_key].to(device, non_blocking=True).view(images.size(0), -1)
+            gt_landmarks_reshaped = batch_data[landmark_key].to(device, non_blocking=True)
+
+            gt_gaze = None
+            if args.training_mode in ['gaze', 'both']:
+                gt_gaze = batch_data['gaze_2d_angles'].to(device, non_blocking=True)
             
             with torch.amp.autocast(device_type='cuda', enabled=args.amp):
                 pred_landmarks, pred_gaze = model(images)
-                
-                # Calculate individual losses
-                landmark_loss = landmark_criterion(pred_landmarks, gt_landmarks_flat)
-                gaze_loss = gaze_criterion(pred_gaze, gt_gaze)
-            
+                                    
                 # Calculate total loss based on training mode
                 total_loss = torch.tensor(0.0, device=device)
+
+                landmark_loss = torch.tensor(0.0, device=device)
                 if args.training_mode in ['landmarks', 'both']:
+                    landmark_loss = landmark_criterion(pred_landmarks, gt_landmarks_flat)
                     total_loss += args.landmark_loss_weight * landmark_loss
+
+                gaze_loss = torch.tensor(0.0, device=device)
                 if args.training_mode in ['gaze', 'both']:
+                    gaze_loss = gaze_criterion(pred_gaze, gt_gaze)
                     total_loss += args.gaze_loss_weight * gaze_loss
                 
             total_loss_accumulator += total_loss.detach()
@@ -201,13 +245,15 @@ def validate(model, dataloader, landmark_criterion, gaze_criterion, device, args
             current_nme = NME(pred_landmarks_reshaped, gt_landmarks_reshaped, left_eye_idx=0, right_eye_idx=3)
             landmark_nme_accumulator += current_nme.detach()
 
-            # Gaze MSE
-            current_gaze_mse = torch.nn.functional.mse_loss(pred_gaze.detach(), gt_gaze)
-            gaze_mse_accumulator += current_gaze_mse.detach()
-            
-            # Gaze MAE
-            current_gaze_mae = torch.nn.functional.l1_loss(pred_gaze.detach(), gt_gaze)
-            gaze_mae_accumulator += current_gaze_mae.detach()
+            # Gaze metrics if applicable
+            if args.training_mode in ['gaze', 'both']:
+                # Gaze MSE
+                current_gaze_mse = torch.nn.functional.mse_loss(pred_gaze.detach(), gt_gaze)
+                gaze_mse_accumulator += current_gaze_mse.detach()
+                
+                # Gaze MAE
+                current_gaze_mae = torch.nn.functional.l1_loss(pred_gaze.detach(), gt_gaze)
+                gaze_mae_accumulator += current_gaze_mae.detach()
             
     avg_total_loss = (total_loss_accumulator / len(dataloader)).item()
     avg_landmark_loss = (landmark_loss_accumulator / len(dataloader)).item()
@@ -225,6 +271,21 @@ def validate(model, dataloader, landmark_criterion, gaze_criterion, device, args
 # Main Function
 def main():
     args = get_args()
+    
+    if args.dataset == 'wflw':
+        if not args.annotation_file and not (args.train_annotation_file and args.val_annotation_file):
+            print("Error: For WFLW dataset, either --annotation_file or both --train_annotation_file and --val_annotation_file must be provided")
+            return
+    
+    if args.dataset == '300w':
+        if not (0.0 < args.train_test_split < 1.0):
+            print(f"Error: train_test_split must be between 0.0 and 1.0, got {args.train_test_split}")
+            return
+    
+    if args.dataset != 'mpii' and args.training_mode in ['gaze', 'both']:
+        print(f"Warning: Gaze training is only supported for the MPII dataset. Switching mode to 'landmarks'.")
+        args.training_mode = 'landmarks'
+    
     set_seed(args.seed)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -267,36 +328,110 @@ def main():
     train_transform = transforms.Compose(train_transform_list)
     val_transform = transforms.Compose(val_transform_list)
 
-    # DataLoaders
-    try:
-        train_ids = [int(p_id) for p_id in args.train_participant_ids.split(',')]
-        val_ids = [int(p_id) for p_id in args.val_participant_ids.split(',')]
-    except ValueError:
-        print("Error: Participant IDs must be comma-separated integers.")
-        return
+    # Dataset creation based on dataset type
+    if args.dataset == 'mpii':
+        try:
+            train_ids = [int(p_id) for p_id in args.train_participant_ids.split(',')]
+            val_ids = [int(p_id) for p_id in args.val_participant_ids.split(',')]
+        except ValueError:
+            print("Error: Participant IDs must be comma-separated integers.")
+            return
 
-    print(f"Training with participant IDs: {train_ids}")
-    print(f"Validating with participant IDs: {val_ids}")
+        print(f"Training with MPII participant IDs: {train_ids}")
+        print(f"Validating with MPII participant IDs: {val_ids}")
 
-    train_dataset = MPIIFaceGazeDataset(dataset_path=args.data_dir, 
-                                        participant_ids=train_ids, 
-                                        transform=train_transform,
-                                        is_train=True,
-                                        affine_aug=args.affine_aug,
-                                        flip_aug=args.flip_aug,
-                                        use_cache=args.use_cache,
-                                        label_smoothing=args.label_smoothing)
-    val_dataset = MPIIFaceGazeDataset(dataset_path=args.data_dir, 
-                                      participant_ids=val_ids, 
-                                      transform=val_transform,
-                                      is_train=False,
-                                      use_cache=args.use_cache)
-    
+        train_dataset = MPIIFaceGazeDataset(
+            dataset_path=args.data_dir, 
+            participant_ids=train_ids, 
+            transform=train_transform,
+            is_train=True,
+            affine_aug=args.affine_aug,
+            flip_aug=args.flip_aug,
+            use_cache=args.use_cache,
+            label_smoothing=args.label_smoothing
+        )
+        val_dataset = MPIIFaceGazeDataset(
+            dataset_path=args.data_dir, 
+            participant_ids=val_ids, 
+            transform=val_transform,
+            is_train=False,
+            use_cache=args.use_cache
+        )
+        landmark_key = 'facial_landmarks'
+        
+    elif args.dataset == 'wflw':
+        if args.train_annotation_file and args.val_annotation_file:
+            train_annotation = args.train_annotation_file
+            val_annotation = args.val_annotation_file
+        else:
+            train_annotation = val_annotation = args.annotation_file
+            
+        print(f"Training with WFLW annotation: {train_annotation}")
+        print(f"Validating with WFLW annotation: {val_annotation}")
+
+        train_dataset = WFLWDataset(
+            annotation_file=train_annotation,
+            images_dir=args.data_dir,
+            transform=train_transform,
+            is_train=True,
+            affine_aug=args.affine_aug,
+            flip_aug=args.flip_aug,
+            use_cache=args.use_cache,
+            label_smoothing=args.label_smoothing,
+            mpii_landmarks=args.mpii_landmarks
+        )
+        val_dataset = WFLWDataset(
+            annotation_file=val_annotation,
+            images_dir=args.data_dir,
+            transform=val_transform,
+            is_train=False,
+            use_cache=args.use_cache,
+            mpii_landmarks=args.mpii_landmarks
+        )
+        landmark_key = 'landmarks'
+        
+    else:  # 300w
+        subset_str = f" ({args.subset} subset)" if args.subset else " (both subsets)"
+        print(f"Training with 300W dataset from {args.data_dir}{subset_str}")
+        print(f"Using padding_ratio={args.padding_ratio}, translation_ratio={args.translation_ratio}")
+        print(f"Train/test split: {args.train_test_split:.2f}/{1-args.train_test_split:.2f} (seed: {args.split_seed})")
+
+        train_dataset = Face300WDataset(
+            root_dir=args.data_dir,
+            subset=args.subset,
+            transform=train_transform,
+            is_train=True,
+            affine_aug=args.affine_aug,
+            flip_aug=args.flip_aug,
+            use_cache=args.use_cache,
+            label_smoothing=args.label_smoothing,
+            mpii_landmarks=args.mpii_landmarks,
+            padding_ratio=args.padding_ratio,
+            translation_ratio=args.translation_ratio,
+            train_test_split=args.train_test_split,
+            split='train',
+            split_seed=args.split_seed
+        )
+        val_dataset = Face300WDataset(
+            root_dir=args.data_dir,
+            subset=args.subset,
+            transform=val_transform,
+            is_train=False,
+            use_cache=args.use_cache,
+            mpii_landmarks=args.mpii_landmarks,
+            padding_ratio=args.padding_ratio,
+            translation_ratio=0.0,  # No translation during validation
+            train_test_split=args.train_test_split,
+            split='test',
+            split_seed=args.split_seed
+        )
+        landmark_key = 'landmarks'
+
     if not train_dataset.samples:
-        print(f"Error: No training samples found. Check data_dir ('{args.data_dir}') and train_participant_ids ('{args.train_participant_ids}').")
+        print(f"Error: No training samples found. Check data paths and configurations.")
         return
     if not val_dataset.samples:
-        print(f"Error: No validation samples found. Check data_dir ('{args.data_dir}') and val_participant_ids ('{args.val_participant_ids}').")
+        print(f"Error: No validation samples found. Check data paths and configurations.")
         return
 
     # Optimized DataLoader settings for reduced CPU overhead
@@ -331,6 +466,7 @@ def main():
         in_channels=args.input_channels,
         dropout_rate=args.dropout_rate
     ).to(device)
+    
     print(f"Model: MHModel initialized with {args.num_landmarks} landmarks and {args.input_channels} input channel(s).")
     print(f"Backbone pretrained: {not args.no_pretrained_backbone}")
     print(f"Training Mode: {args.training_mode.upper()} (Landmark Weight: {args.landmark_loss_weight}, Gaze Weight: {args.gaze_loss_weight})")
@@ -436,8 +572,8 @@ def main():
         
         history['lr'].append(optimizer.param_groups[0]['lr'])  # Record LR for the epoch
 
-        train_total_loss, train_lmk_loss, train_gaze_loss, train_nme, train_gaze_mse, train_gaze_mae = train_one_epoch(model, train_loader, landmark_criterion, gaze_criterion, optimizer, scaler, device, epoch, args)
-        val_total_loss, val_lmk_loss, val_gaze_loss, val_nme, val_gaze_mse, val_gaze_mae = validate(model, val_loader, landmark_criterion, gaze_criterion, device, args)
+        train_total_loss, train_lmk_loss, train_gaze_loss, train_nme, train_gaze_mse, train_gaze_mae = train_one_epoch(model, train_loader, landmark_criterion, gaze_criterion, optimizer, scaler, device, epoch, args, landmark_key)
+        val_total_loss, val_lmk_loss, val_gaze_loss, val_nme, val_gaze_mse, val_gaze_mae = validate(model, val_loader, landmark_criterion, gaze_criterion, device, args, landmark_key)
         
         # Step the scheduler if in main training phase (and scheduler exists)
         if not is_warmup_epoch and scheduler is not None:
@@ -464,14 +600,14 @@ def main():
         if (epoch + 1) % args.checkpoint_freq == 0 or (epoch + 1) == args.epochs:
             checkpoint_path = os.path.join(args.checkpoint_dir, f'epoch_{epoch+1}.pth')
             # Pass scheduler to save_checkpoint
-            save_checkpoint(epoch, model, optimizer, scheduler, scaler if args.amp else None, checkpoint_path)
+            save_checkpoint(epoch, model, optimizer, scheduler, scaler if args.amp else None, checkpoint_path, args.num_landmarks, args.dataset)
             save_history(history, history_filepath)
         
         if val_total_loss < best_val_loss:
             best_val_loss = val_total_loss
             best_checkpoint_path = os.path.join(args.checkpoint_dir, 'best_model.pth')
             # Pass scheduler to save_checkpoint
-            save_checkpoint(epoch, model, optimizer, scheduler, scaler if args.amp else None, best_checkpoint_path)
+            save_checkpoint(epoch, model, optimizer, scheduler, scaler if args.amp else None, best_checkpoint_path, args.num_landmarks, args.dataset)
             save_history(history, history_filepath)
             print(f"New best validation loss: {best_val_loss:.6f}. Saved best model to {best_checkpoint_path}")
         
