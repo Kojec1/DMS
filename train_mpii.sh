@@ -10,7 +10,7 @@ EPOCHS=50
 BATCH_SIZE=32
 LR=1e-4
 NUM_WORKERS=8 # Adjust based on your machine's capabilities
-TRAINING_MODE="both" # Options: 'landmarks', 'gaze', 'both'
+TRAINING_MODE="landmarks,gaze_2d,gaze_3d" # Options: 'landmarks', 'gaze_2d', 'gaze_3d', or comma-separated combinations like 'landmarks,gaze_2d', 'landmarks,gaze_2d,gaze_3d'
 
 # -- Run Training --
 echo "======================================================"

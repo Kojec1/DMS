@@ -22,7 +22,8 @@ class MHModel(nn.Module):
 
         self.dropout = nn.Dropout(dropout_rate)
         self.landmark_head = nn.Linear(self.backbone.out_features, num_outputs)
-        self.gaze_head = nn.Linear(self.backbone.out_features, 2)
+        self.gaze_2d_head = nn.Linear(self.backbone.out_features, 2)
+        self.gaze_3d_head = nn.Linear(self.backbone.out_features, 3)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -34,9 +35,10 @@ class MHModel(nn.Module):
         features_flattened = self.dropout(features_flattened)
 
         landmarks = self.landmark_head(features_flattened)
-        gaze = self.gaze_head(features_flattened)
+        gaze_2d = self.gaze_2d_head(features_flattened)
+        gaze_3d = self.gaze_3d_head(features_flattened) 
 
-        return landmarks, gaze
+        return landmarks, gaze_2d, gaze_3d
     
     def _replace_first_conv_layer(self) -> None:
         original_first_conv_layer = self.backbone[0][0][0]
