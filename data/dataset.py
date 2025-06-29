@@ -6,6 +6,7 @@ from PIL import Image, ImageOps
 import torchvision.transforms.functional as TF
 import random
 from .augmentation import horizontal_flip, normalize_landmarks, crop_to_content, apply_clahe, random_affine_with_landmarks, landmarks_smoothing, crop_to_landmarks
+import cv2
 
 class BaseDataset(Dataset):
     """Base PyTorch Dataset template. Custom datasets should inherit from this class."""
@@ -126,6 +127,24 @@ class MPIIFaceGazeDataset(BaseDataset):
                         print(f"Warning: IndexError processing line {line_idx+1} in {annotation_file}: '{line.strip()}'. Error: {e}. Skipping.")
                         continue
 
+    def _normalize_gaze_to_head(self, gaze_cam_np: np.ndarray, head_rvec_np: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Rotate 3-D gaze direction from camera to head coordinate system."""
+        if np.linalg.norm(gaze_cam_np) == 0:
+            # Degenerate – return default forward direction.
+            return np.array([0.0, 0.0, -1.0], dtype=np.float32), np.array([0.0, 0.0], dtype=np.float32)
+
+        # Rotation matrix: head -> camera.  We need camera -> head, i.e. R^T.
+        R_head2cam, _ = cv2.Rodrigues(head_rvec_np.astype(np.float32))
+        R_cam2head = R_head2cam.T  # inverse because R is orthonormal
+
+        gaze_head_np = R_cam2head @ gaze_cam_np.astype(np.float32)
+        gaze_head_np = gaze_head_np / (np.linalg.norm(gaze_head_np) + 1e-6)
+
+        pitch = np.arcsin(np.clip(-gaze_head_np[1], -1.0, 1.0))
+        yaw = np.arctan2(-gaze_head_np[0], -gaze_head_np[2])
+        gaze_angles_np = np.array([pitch, yaw], dtype=np.float32)
+        
+        return gaze_head_np.astype(np.float32), gaze_angles_np
 
     def __len__(self):
         return len(self.samples)
@@ -134,10 +153,8 @@ class MPIIFaceGazeDataset(BaseDataset):
         sample = self.samples[index]
         image_path = sample['image_path']
         
-        # Make a fresh copy of landmarks and gaze data from metadata each time
+        # Make a fresh copy of landmarks; gaze will be recomputed after head-pose normalisation
         landmarks = sample['facial_landmarks'].copy()
-        gaze_2d_angles = sample['gaze_2d_angles'].copy()
-        gaze_3d_direction = sample['gaze_direction_cam_3d'].copy()
 
         image = None
 
@@ -161,19 +178,19 @@ class MPIIFaceGazeDataset(BaseDataset):
          
         effective_width, effective_height = image.size 
 
+        # --- Head-pose normalisation (rotate gaze into head coordinate system) ---
+        gaze_3d_direction_head, gaze_2d_angles = self._normalize_gaze_to_head(
+            sample['gaze_direction_cam_3d'], sample['head_pose_rvec'])
+
         # Affine Augmentation (if training)
         if self.is_train and self.affine_aug and random.random() > 0.5:
-            image, landmarks, gaze_2d_angles, gaze_3d_direction = random_affine_with_landmarks(
-                image, landmarks, gaze_2d_angles, gaze_3d_direction)
+            image, landmarks, gaze_2d_angles, gaze_3d_direction_head = random_affine_with_landmarks(
+                image, landmarks, gaze_2d_angles, gaze_3d_direction_head)
 
         # Horizontal Flip (if training)
         if self.is_train and self.flip_aug and random.random() > 0.5:
-            image, landmarks, gaze_2d_angles, gaze_3d_direction = horizontal_flip(
-                image, landmarks, gaze_2d_angles, effective_width, gaze_3d_direction)
-            # Swap landmark indices after horizontal flip
-            # Original: 0:L_outer, 1:L_inner, 2:R_inner, 3:R_outer, 4:L_mouth, 5:R_mouth
-            # Flipped:  0:R_outer, 1:R_inner, 2:L_inner, 3:L_outer, 4:R_mouth, 5:L_mouth
-            landmarks = landmarks[[3, 2, 1, 0, 5, 4], :]
+            image, landmarks, gaze_2d_angles, gaze_3d_direction_head = horizontal_flip(
+                image, landmarks, gaze_2d_angles, effective_width, gaze_3d_direction_head)
 
         # Normalize landmarks to [0, 1]
         landmarks = normalize_landmarks(landmarks, effective_width, effective_height)
@@ -196,7 +213,7 @@ class MPIIFaceGazeDataset(BaseDataset):
         item_to_return['head_pose_tvec'] = torch.from_numpy(sample['head_pose_tvec'])
         item_to_return['face_center_cam'] = torch.from_numpy(sample['face_center_cam'])
         item_to_return['gaze_target_cam'] = torch.from_numpy(sample['gaze_target_cam'])
-        item_to_return['gaze_direction_cam_3d'] = torch.from_numpy(gaze_3d_direction.astype(np.float32))
+        item_to_return['gaze_direction_cam_3d'] = torch.from_numpy(gaze_3d_direction_head.astype(np.float32))
         item_to_return['gaze_2d_angles'] = torch.from_numpy(gaze_2d_angles.astype(np.float32))
         
         # Non-tensor data
