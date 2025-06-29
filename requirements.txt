@@ -4,3 +4,5 @@ numpy
 tqdm
 matplotlib
 Pillow
+dlib
+opencv-python
