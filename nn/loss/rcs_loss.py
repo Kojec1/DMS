@@ -71,8 +71,9 @@ class RCSLoss(nn.Module):
 
         # Regression term
         probs = F.softmax(logits, dim=1)
+        offsets = self._offsets.to(logits.device)
         # Expected angle in bin units then scale by bin width
-        expected = self.bin_width * torch.sum(probs * self._offsets, dim=1)
+        expected = self.bin_width * torch.sum(probs * offsets, dim=1)
 
         if self.regression == "mae":
             reg_loss = F.l1_loss(expected, angle_target)

@@ -492,8 +492,8 @@ def main():
 
     # Loss and Optimizer
     landmark_criterion = SmoothWingLoss() # Smooth Wing Loss for landmark regression
-    yaw_criterion = RCSLoss(num_bins=args.num_angle_bins, bin_width=3.0, alpha=1.0, regression='mae')
-    pitch_criterion = RCSLoss(num_bins=args.num_angle_bins, bin_width=3.0, alpha=1.0, regression='mae')
+    yaw_criterion = RCSLoss(num_bins=args.num_angle_bins, bin_width=3.0, alpha=1.0, regression='mae').to(device)
+    pitch_criterion = RCSLoss(num_bins=args.num_angle_bins, bin_width=3.0, alpha=1.0, regression='mae').to(device)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
     # Learning Rate Scheduler, will be initialized considering warmup
