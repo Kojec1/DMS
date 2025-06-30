@@ -3,9 +3,7 @@ import os
 
 
 def plot_training_history(history, save_path):
-    """
-    Plots the training/validation history for the multi-head model using subplots, then saves it.
-    """
+    """Plots the training/validation history for the multi-head model using subplots, then saves it."""
     # Determine the number of epochs from one of the history lists
     if not history or not history.get('train_total_loss'):
         print("Warning: History is empty or missing key 'train_total_loss'. Cannot generate plot.")
@@ -13,15 +11,15 @@ def plot_training_history(history, save_path):
         
     epochs = range(1, len(history['train_total_loss']) + 1)
     
-    # Check if we have 2D/3D gaze metrics
-    has_2d_gaze = 'train_gaze_2d_loss' in history and history['train_gaze_2d_loss']
-    has_3d_gaze = 'train_gaze_3d_loss' in history and history['train_gaze_3d_loss']
+    # Determine metric availability
+    has_new_gaze = 'train_gaze_loss' in history and history['train_gaze_loss']
+    has_ang_err = 'train_ang_error' in history and history['train_ang_error']
     
     # Determine grid size based on available metrics
-    if has_2d_gaze or has_3d_gaze:
-        # Format with 2D/3D gaze metrics - use larger grid
+    if has_new_gaze:
+        # Format with new gaze metrics - use larger grid
         fig, axes = plt.subplots(4, 3, figsize=(24, 24))
-        fig.suptitle('Training & Validation Metrics (2D/3D Gaze)', fontsize=20)
+        fig.suptitle('Training & Validation Metrics (Gaze)', fontsize=20)
     else:
         # Landmarks-only - use smaller grid
         fig, axes = plt.subplots(3, 2, figsize=(20, 18))
@@ -54,41 +52,18 @@ def plot_training_history(history, save_path):
     plot_metric(axes[plot_idx], 'train_landmark_loss', 'val_landmark_loss', 'Landmark Loss', 'Loss')
     plot_idx += 1
 
-    if has_2d_gaze or has_3d_gaze:
-        # Format with separate 2D/3D gaze metrics
-        
-        # 3. 2D Gaze Loss
-        if has_2d_gaze:
-            plot_metric(axes[plot_idx], 'train_gaze_2d_loss', 'val_gaze_2d_loss', '2D Gaze Loss (MSE)', 'Loss')
-            plot_idx += 1
-        
-        # 4. 3D Gaze Loss
-        if has_3d_gaze:
-            plot_metric(axes[plot_idx], 'train_gaze_3d_loss', 'val_gaze_3d_loss', '3D Gaze Loss (MSE)', 'Loss')
-            plot_idx += 1
+    if has_new_gaze:
+        # 3. Gaze Loss
+        plot_metric(axes[plot_idx], 'train_gaze_loss', 'val_gaze_loss', 'Gaze Loss (RCS)', 'Loss')
+        plot_idx += 1
 
-        # 5. Landmark NME
+        # 4. Landmark NME
         plot_metric(axes[plot_idx], 'train_landmark_nme', 'val_landmark_nme', 'Landmark NME', 'NME')
         plot_idx += 1
 
-        # 6. 2D Gaze MSE
-        if has_2d_gaze:
-            plot_metric(axes[plot_idx], 'train_gaze_2d_mse', 'val_gaze_2d_mse', '2D Gaze MSE (Metric)', 'MSE', log_scale=False)
-            plot_idx += 1
-
-        # 7. 2D Gaze MAE
-        if has_2d_gaze:
-            plot_metric(axes[plot_idx], 'train_gaze_2d_mae', 'val_gaze_2d_mae', '2D Gaze MAE (Metric)', 'MAE', log_scale=False)
-            plot_idx += 1
-
-        # 8. 3D Gaze MSE
-        if has_3d_gaze:
-            plot_metric(axes[plot_idx], 'train_gaze_3d_mse', 'val_gaze_3d_mse', '3D Gaze MSE (Metric)', 'MSE', log_scale=False)
-            plot_idx += 1
-
-        # 9. 3D Gaze MAE
-        if has_3d_gaze:
-            plot_metric(axes[plot_idx], 'train_gaze_3d_mae', 'val_gaze_3d_mae', '3D Gaze MAE (Metric)', 'MAE', log_scale=False)
+        # 5. Angular Error
+        if has_ang_err:
+            plot_metric(axes[plot_idx], 'train_ang_error', 'val_ang_error', 'Gaze Angular Error (°)', 'Error', log_scale=False)
             plot_idx += 1
 
     else:

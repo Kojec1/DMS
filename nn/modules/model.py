@@ -3,42 +3,45 @@ import torch.nn as nn
 from nn.modules.bottleneck.convnext import convnext_tiny
 
 class MHModel(nn.Module):
-    def __init__ (self, num_landmarks: int = 6, pretrained_backbone: bool = True, in_channels: int = 1, dropout_rate: float = 0.2) -> None:
-        """
-        Multi-Head Model for Facial Landmark Esimation and 2D Gaze Estimation using a ConvNeXt Tiny backbone.
-
-        """
-        super(MHModel, self).__init__()
+    def __init__(self,
+                 num_landmarks: int = 6,
+                 pretrained_backbone: bool = True,
+                 in_channels: int = 1,
+                 dropout_rate: float = 0.2,
+                 num_bins: int = 14) -> None:
+        """Multi-Head model for landmarks and gaze estimation."""
+        super().__init__()
 
         self.backbone = convnext_tiny(pretrained=pretrained_backbone)
         self.num_landmarks = num_landmarks
         self.pretrained_backbone = pretrained_backbone
         self.in_channels = in_channels
-        num_outputs = num_landmarks * 2  # Each landmark has (x, y) coordinates
+        self.num_bins = num_bins
 
-        # Replace the first conv layer for grayscale input
+        num_outputs = num_landmarks * 2  # Each landmark has (x, y)
+
+        # Replace first conv for grayscale (if necessary)
         if self.in_channels == 1:
             self._replace_first_conv_layer()
 
         self.dropout = nn.Dropout(dropout_rate)
-        self.landmark_head = nn.Linear(self.backbone.out_features, num_outputs)
-        self.gaze_2d_head = nn.Linear(self.backbone.out_features, 2)
-        self.gaze_3d_head = nn.Linear(self.backbone.out_features, 3)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass of the model.
-        Returns a tuple of (landmarks, gaze).
-        """
+        # Heads
+        self.landmark_head = nn.Linear(self.backbone.out_features, num_outputs)
+        self.yaw_head = nn.Linear(self.backbone.out_features, num_bins)
+        self.pitch_head = nn.Linear(self.backbone.out_features, num_bins)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward pass."""
         features = self.backbone(x)
         features_flattened = torch.flatten(features, 1)
         features_flattened = self.dropout(features_flattened)
 
         landmarks = self.landmark_head(features_flattened)
-        gaze_2d = self.gaze_2d_head(features_flattened)
-        gaze_3d = self.gaze_3d_head(features_flattened) 
+        yaw_logits = self.yaw_head(features_flattened)
+        pitch_logits = self.pitch_head(features_flattened)
 
-        return landmarks, gaze_2d, gaze_3d
+        return landmarks, yaw_logits, pitch_logits
     
     def _replace_first_conv_layer(self) -> None:
         original_first_conv_layer = self.backbone[0][0][0]

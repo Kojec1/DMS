@@ -216,6 +216,30 @@ class MPIIFaceGazeDataset(BaseDataset):
         item_to_return['gaze_direction_cam_3d'] = torch.from_numpy(gaze_3d_direction_head.astype(np.float32))
         item_to_return['gaze_2d_angles'] = torch.from_numpy(gaze_2d_angles.astype(np.float32))
         
+        # ------------------------------------------------------------------
+        # Bin encoding for yaw / pitch (3° bins, 14 bins, range ≈ [-21°, 21°])
+        num_bins = 14
+        bin_width = 3.0
+
+        def _angle_to_bin(angle_rad: float) -> int:
+            angle_deg = np.degrees(angle_rad)
+            half_range = (num_bins * bin_width) / 2.0  # e.g. 21°
+            idx = int(np.floor((angle_deg + half_range) / bin_width))
+            idx = np.clip(idx, 0, num_bins - 1)
+            return idx
+
+        pitch_bin_idx = _angle_to_bin(gaze_2d_angles[0])
+        yaw_bin_idx = _angle_to_bin(gaze_2d_angles[1])
+
+        # One-hot vectors
+        pitch_onehot = np.zeros(num_bins, dtype=np.float32)
+        yaw_onehot = np.zeros(num_bins, dtype=np.float32)
+        pitch_onehot[pitch_bin_idx] = 1.0
+        yaw_onehot[yaw_bin_idx] = 1.0
+
+        item_to_return['pitch_bin_onehot'] = torch.from_numpy(pitch_onehot)
+        item_to_return['yaw_bin_onehot'] = torch.from_numpy(yaw_onehot)
+        
         # Non-tensor data
         item_to_return['eval_eye'] = sample['eval_eye'] # String
         item_to_return['image_path'] = image_path # String, for debugging or reference
