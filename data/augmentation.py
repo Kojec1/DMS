@@ -151,13 +151,34 @@ def crop_to_landmarks(pil_image, landmarks_np, padding_ratio=0.3, translation_ra
 
 def apply_clahe(pil_image, clip_limit=2.0, tile_grid_size=(8,8)):
     """
-    Applies CLAHE to the PIL image.
+    Applies CLAHE to the PIL image. Handles both grayscale and RGB images.
     """
-    img_np_for_clahe = np.array(pil_image)
-    clahe_obj = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
-    cl_img_np = clahe_obj.apply(img_np_for_clahe)
-    clahe_pil_image = Image.fromarray(cl_img_np)
-    return clahe_pil_image 
+    if pil_image.mode == 'L':
+        # Grayscale image
+        img_np_for_clahe = np.array(pil_image)
+        clahe_obj = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+        cl_img_np = clahe_obj.apply(img_np_for_clahe)
+        clahe_pil_image = Image.fromarray(cl_img_np)
+    elif pil_image.mode == 'RGB':
+        # RGB image
+        img_np_rgb = np.array(pil_image)
+        # Convert RGB to LAB color space
+        img_np_lab = cv2.cvtColor(img_np_rgb, cv2.COLOR_RGB2LAB)
+        # Split LAB channels
+        l_channel, a_channel, b_channel = cv2.split(img_np_lab)
+        # Apply CLAHE to the L-channel
+        clahe_obj = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+        cl_l_channel = clahe_obj.apply(l_channel)
+        # Merge the CLAHE-enhanced L-channel back with A and B channels
+        merged_lab_channels = cv2.merge((cl_l_channel, a_channel, b_channel))
+        # Convert back to RGB color space
+        final_rgb_img_np = cv2.cvtColor(merged_lab_channels, cv2.COLOR_LAB2RGB)
+        clahe_pil_image = Image.fromarray(final_rgb_img_np)
+    else:
+        # For other modes, return the original image
+        clahe_pil_image = pil_image
+
+    return clahe_pil_image
 
 def random_affine_with_landmarks(image, landmarks_np, gaze_2d_angles_np=None, gaze_3d_direction_np=None, degrees=(-20, 20), translate_fractions=(0.1, 0.1), scale_range=(0.8, 1.2)):
     """

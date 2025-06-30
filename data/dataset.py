@@ -23,7 +23,7 @@ class BaseDataset(Dataset):
     
     
 class MPIIFaceGazeDataset(BaseDataset):
-    """
+    """ 
     Landmarks:
     - 0: Left outer eye
     - 1: Left inner eye
@@ -32,7 +32,7 @@ class MPIIFaceGazeDataset(BaseDataset):
     - 4: Left mouth
     - 5: Right mouth
     """
-    def __init__(self, dataset_path, participant_ids, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0):
+    def __init__(self, dataset_path, participant_ids, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, input_channels=1, use_clahe=False):
         super().__init__(transform)
         self.dataset_path = dataset_path
         self.samples = []
@@ -40,7 +40,9 @@ class MPIIFaceGazeDataset(BaseDataset):
         self.affine_aug = affine_aug
         self.flip_aug = flip_aug
         self.use_cache = use_cache
-        self.label_smoothing = label_smoothing 
+        self.label_smoothing = label_smoothing
+        self.input_channels = input_channels
+        self.use_clahe = use_clahe
         
         if self.use_cache:
             self.image_cache = {}
@@ -162,13 +164,18 @@ class MPIIFaceGazeDataset(BaseDataset):
             image, landmarks = self.image_cache[image_path]
             landmarks = landmarks.copy() 
         else:
-            image = Image.open(image_path).convert('L') # Load and convert to grayscale
+            image = Image.open(image_path)
+            if self.input_channels == 1:
+                image = image.convert('L')
+            else:
+                image = image.convert('RGB')
 
             # Crop to non-black region (content crop)
             image, landmarks = crop_to_content(image, landmarks, non_black_threshold=1)
             
             # Apply CLAHE 
-            image = apply_clahe(image) # Uses default clipLimit=2.0, tileGridSize=(8,8)
+            if self.use_clahe:
+                image = apply_clahe(image) # Uses default clipLimit=2.0, tileGridSize=(8,8)
 
             if self.use_cache:
                 self.image_cache[image_path] = (image.copy(), landmarks.copy())  # Store copies
@@ -260,7 +267,7 @@ class WFLWDataset(BaseDataset):
     - 76: Left mouth
     - 82 Right mouth
     """
-    def __init__(self, annotation_file, images_dir, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, mpii_landmarks=False):
+    def __init__(self, annotation_file, images_dir, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, mpii_landmarks=False, input_channels=1, use_clahe=False):
         super().__init__(transform)
         self.annotation_file = annotation_file
         self.images_dir = images_dir
@@ -271,6 +278,8 @@ class WFLWDataset(BaseDataset):
         self.use_cache = use_cache
         self.label_smoothing = label_smoothing
         self.mpii_landmarks = mpii_landmarks
+        self.input_channels = input_channels
+        self.use_clahe = use_clahe
 
         if self.use_cache:
             self.image_cache = {}
@@ -345,7 +354,11 @@ class WFLWDataset(BaseDataset):
             image, landmarks = self.image_cache[image_path]
             landmarks = landmarks.copy()
         else:
-            image = Image.open(image_path).convert('L')
+            image = Image.open(image_path)
+            if self.input_channels == 1:
+                image = image.convert('L')
+            else:
+                image = image.convert('RGB')
             
             # Crop based on bounding box
             x_min, y_min, x_max, y_max = bbox
@@ -366,7 +379,8 @@ class WFLWDataset(BaseDataset):
             landmarks[:, 1] -= y_min
             
             # Apply CLAHE
-            image = apply_clahe(image)
+            if self.use_clahe:
+                image = apply_clahe(image)
 
             if self.use_cache:
                 self.image_cache[image_path] = (image.copy(), landmarks.copy())
@@ -438,7 +452,7 @@ class Face300WDataset(BaseDataset):
     - 48: Left mouth
     - 54: Right mouth
     """
-    def __init__(self, root_dir, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, subset=None, mpii_landmarks=False, padding_ratio=0.3, translation_ratio=0.2, train_test_split=0.8, split='train', split_seed=42):
+    def __init__(self, root_dir, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, subset=None, mpii_landmarks=False, padding_ratio=0.3, translation_ratio=0.2, train_test_split=0.8, split='train', split_seed=42, input_channels=1, use_clahe=False):
         super().__init__(transform)
         self.root_dir = root_dir
         self.samples = []
@@ -454,6 +468,8 @@ class Face300WDataset(BaseDataset):
         self.train_test_split = train_test_split  # Ratio of training data (0.0 to 1.0)
         self.split = split  # 'train' or 'test'
         self.split_seed = split_seed  # Seed for reproducible splits
+        self.input_channels = input_channels
+        self.use_clahe = use_clahe
         
         if self.use_cache:
             self.image_cache = {}
@@ -614,7 +630,11 @@ class Face300WDataset(BaseDataset):
             image, landmarks = self.image_cache[image_path]
             landmarks = landmarks.copy()
         else:
-            image = Image.open(image_path).convert('L')
+            image = Image.open(image_path)
+            if self.input_channels == 1:
+                image = image.convert('L')
+            else:
+                image = image.convert('RGB')
 
             # Crop to face region based on landmarks with padding and optional random translation
             translation_ratio = self.translation_ratio if self.is_train else 0.0
@@ -623,7 +643,8 @@ class Face300WDataset(BaseDataset):
                                                translation_ratio=translation_ratio)
             
             # Apply CLAHE
-            image = apply_clahe(image)
+            if self.use_clahe:
+                image = apply_clahe(image)
 
             if self.use_cache:
                 self.image_cache[image_path] = (image.copy(), landmarks.copy())

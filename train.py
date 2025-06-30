@@ -53,6 +53,7 @@ def get_args():
     # Augmentation arguments
     parser.add_argument('--affine_aug', action='store_true', help='Use affine augmentation')
     parser.add_argument('--flip_aug', action='store_true', help='Use flip augmentation')
+    parser.add_argument('--use_clahe', action='store_true', help='Apply CLAHE to images')
     parser.add_argument('--label_smoothing', type=float, default=0.01, help='Label smoothing for the dataset')
     parser.add_argument('--use_cache', action='store_true', help='Use cached images and landmarks')
 
@@ -366,14 +367,18 @@ def main():
             affine_aug=args.affine_aug,
             flip_aug=args.flip_aug,
             use_cache=args.use_cache,
-            label_smoothing=args.label_smoothing
+            label_smoothing=args.label_smoothing,
+            input_channels=args.input_channels,
+            use_clahe=args.use_clahe
         )
         val_dataset = MPIIFaceGazeDataset(
             dataset_path=args.data_dir, 
             participant_ids=val_ids, 
             transform=val_transform,
             is_train=False,
-            use_cache=args.use_cache
+            use_cache=args.use_cache,
+            input_channels=args.input_channels,
+            use_clahe=args.use_clahe
         )
         landmark_key = 'facial_landmarks'
         
@@ -396,7 +401,9 @@ def main():
             flip_aug=args.flip_aug,
             use_cache=args.use_cache,
             label_smoothing=args.label_smoothing,
-            mpii_landmarks=args.mpii_landmarks
+            mpii_landmarks=args.mpii_landmarks,
+            input_channels=args.input_channels,
+            use_clahe=args.use_clahe
         )
         val_dataset = WFLWDataset(
             annotation_file=val_annotation,
@@ -404,7 +411,9 @@ def main():
             transform=val_transform,
             is_train=False,
             use_cache=args.use_cache,
-            mpii_landmarks=args.mpii_landmarks
+            mpii_landmarks=args.mpii_landmarks,
+            input_channels=args.input_channels,
+            use_clahe=args.use_clahe
         )
         landmark_key = 'landmarks'
         
@@ -428,7 +437,9 @@ def main():
             translation_ratio=args.translation_ratio,
             train_test_split=args.train_test_split,
             split='train',
-            split_seed=args.split_seed
+            split_seed=args.split_seed,
+            input_channels=args.input_channels,
+            use_clahe=args.use_clahe
         )
         val_dataset = Face300WDataset(
             root_dir=args.data_dir,
@@ -441,7 +452,9 @@ def main():
             translation_ratio=0.0,  # No translation during validation
             train_test_split=args.train_test_split,
             split='test',
-            split_seed=args.split_seed
+            split_seed=args.split_seed,
+            input_channels=args.input_channels,
+            use_clahe=args.use_clahe
         )
         landmark_key = 'landmarks'
 
