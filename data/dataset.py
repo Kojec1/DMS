@@ -32,7 +32,7 @@ class MPIIFaceGazeDataset(BaseDataset):
     - 4: Left mouth
     - 5: Right mouth
     """
-    def __init__(self, dataset_path, participant_ids, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, input_channels=1, use_clahe=False):
+    def __init__(self, dataset_path, participant_ids, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, input_channels=1, use_clahe=False, angle_bin_width=3.0, num_angle_bins=14):
         super().__init__(transform)
         self.dataset_path = dataset_path
         self.samples = []
@@ -43,6 +43,8 @@ class MPIIFaceGazeDataset(BaseDataset):
         self.label_smoothing = label_smoothing
         self.input_channels = input_channels
         self.use_clahe = use_clahe
+        self.angle_bin_width = angle_bin_width
+        self.num_angle_bins = num_angle_bins
         
         if self.use_cache:
             self.image_cache = {}
@@ -223,14 +225,13 @@ class MPIIFaceGazeDataset(BaseDataset):
         item_to_return['gaze_direction_cam_3d'] = torch.from_numpy(gaze_3d_direction_head.astype(np.float32))
         item_to_return['gaze_2d_angles'] = torch.from_numpy(gaze_2d_angles.astype(np.float32))
         
-        # ------------------------------------------------------------------
-        # Bin encoding for yaw / pitch (3° bins, 14 bins, range ≈ [-21°, 21°])
-        num_bins = 14
-        bin_width = 3.0
+        # Bin encoding for yaw / pitch
+        num_bins = self.num_angle_bins
+        bin_width = self.angle_bin_width
 
         def _angle_to_bin(angle_rad: float) -> int:
             angle_deg = np.degrees(angle_rad)
-            half_range = (num_bins * bin_width) / 2.0  # e.g. 21°
+            half_range = (num_bins * bin_width) / 2.0
             idx = int(np.floor((angle_deg + half_range) / bin_width))
             idx = np.clip(idx, 0, num_bins - 1)
             return idx

@@ -63,7 +63,7 @@ class RCSLoss(nn.Module):
             raise ValueError(
                 f"logits second dim ({logits.shape[1]}) != num_bins ({self.num_bins})")
 
-        angle_target = angle_target.squeeze()  # (B,)
+        angle_target = angle_target.squeeze()
         bin_target = self._angle_to_bin(angle_target)
 
         # Classification term (cross-entropy)

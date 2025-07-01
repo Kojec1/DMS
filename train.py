@@ -67,6 +67,7 @@ def get_args():
     parser.add_argument('--landmark_loss_weight', type=float, default=1.0, help='Weight for landmark loss component.')
     parser.add_argument('--gaze_loss_weight', type=float, default=1.0, help='Weight for gaze (yaw+pitch) RCS loss component.')
     parser.add_argument('--num_angle_bins', type=int, default=14, help='Number of discrete bins for yaw/pitch classification.')
+    parser.add_argument('--angle_bin_width', type=float, default=3.0, help='Width of each discrete angle bin (degrees).')
 
     # MPII-specific arguments
     parser.add_argument('--train_participant_ids', type=str, default="0,1,2,3,4,5,6,7,8,9,10,11", 
@@ -116,7 +117,7 @@ def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_
     angular_err_accum = torch.tensor(0.0, device=device)
 
     # Pre-compute offsets for expectation
-    bin_width = 3.0
+    bin_width = args.angle_bin_width
     num_bins = args.num_angle_bins
     offsets = torch.arange(num_bins, device=device).float() - (num_bins - 1) / 2.0
 
@@ -214,7 +215,7 @@ def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criteri
     angular_err_accum = torch.tensor(0.0, device=device)
 
     # Pre-compute offsets for expectation
-    bin_width = 3.0
+    bin_width = args.angle_bin_width
     num_bins = args.num_angle_bins
     offsets = torch.arange(num_bins, device=device).float() - (num_bins - 1) / 2.0
 
@@ -505,8 +506,8 @@ def main():
 
     # Loss and Optimizer
     landmark_criterion = SmoothWingLoss() # Smooth Wing Loss for landmark regression
-    yaw_criterion = RCSLoss(num_bins=args.num_angle_bins, bin_width=3.0, alpha=1.0, regression='mae').to(device)
-    pitch_criterion = RCSLoss(num_bins=args.num_angle_bins, bin_width=3.0, alpha=1.0, regression='mae').to(device)
+    yaw_criterion = RCSLoss(num_bins=args.num_angle_bins, bin_width=args.angle_bin_width, alpha=1.0, regression='mae').to(device)
+    pitch_criterion = RCSLoss(num_bins=args.num_angle_bins, bin_width=args.angle_bin_width, alpha=1.0, regression='mae').to(device)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
     # Learning Rate Scheduler, will be initialized considering warmup
