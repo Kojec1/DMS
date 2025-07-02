@@ -904,7 +904,7 @@ class MPIIFaceGazeMatDataset(BaseDataset):
 
         # Horizontal flip (Optional)
         if self.horizontal_flip and random.random() > 0.5:
-            img_pil, landmarks_np = horizontal_flip(img_pil, landmarks_np, gaze_2d_angles_np, img_pil.size[0])
+            img_pil, landmarks_np, gaze_2d_angles_np, _ = horizontal_flip(img_pil, landmarks_np, gaze_2d_angles_np, img_pil.size[0])
 
         # Apply transform
         item = {}
