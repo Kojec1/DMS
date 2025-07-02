@@ -49,6 +49,7 @@ def normalize_landmarks(landmarks_np, effective_width, effective_height):
         normalized_landmarks[:, 1] = 0.0
         
     normalized_landmarks = np.clip(normalized_landmarks, 0.0, 1.0)
+    
     return normalized_landmarks 
 
 def crop_to_content(pil_image, landmarks_np, non_black_threshold=1):

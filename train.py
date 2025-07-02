@@ -11,7 +11,7 @@ from tqdm import tqdm
 from nn.modules.model import MHModel
 from nn.loss import SmoothWingLoss, RCSLoss
 from nn.metrics import NME, angular_error
-from data.dataset import MPIIFaceGazeDataset, WFLWDataset, Face300WDataset
+from data.dataset import MPIIFaceGazeMatDataset, WFLWDataset, Face300WDataset
 from utils.visualization import plot_training_history
 from utils.misc import set_seed, setup_device
 from utils.checkpoint import save_checkpoint, load_checkpoint, save_history, load_history
@@ -360,26 +360,48 @@ def main():
         print(f"Training with MPII participant IDs: {train_ids}")
         print(f"Validating with MPII participant IDs: {val_ids}")
 
-        train_dataset = MPIIFaceGazeDataset(
-            dataset_path=args.data_dir, 
-            participant_ids=train_ids, 
+        # train_dataset = MPIIFaceGazeDataset(
+        #     dataset_path=args.data_dir, 
+        #     participant_ids=train_ids, 
+        #     transform=train_transform,
+        #     is_train=True,
+        #     affine_aug=args.affine_aug,
+        #     flip_aug=args.flip_aug,
+        #     use_cache=args.use_cache,
+        #     label_smoothing=args.label_smoothing,
+        #     input_channels=args.input_channels,
+        #     use_clahe=args.use_clahe
+        # )
+        # val_dataset = MPIIFaceGazeDataset(
+        #     dataset_path=args.data_dir, 
+        #     participant_ids=val_ids, 
+        #     transform=val_transform,
+        #     is_train=False,
+        #     use_cache=args.use_cache,
+        #     input_channels=args.input_channels,
+        #     use_clahe=args.use_clahe
+        # )
+
+        train_dataset = MPIIFaceGazeMatDataset(
+            dataset_path=args.data_dir,
+            participant_ids=train_ids,
             transform=train_transform,
-            is_train=True,
-            affine_aug=args.affine_aug,
-            flip_aug=args.flip_aug,
-            use_cache=args.use_cache,
-            label_smoothing=args.label_smoothing,
             input_channels=args.input_channels,
-            use_clahe=args.use_clahe
+            use_cache=args.use_cache,
+            use_clahe=args.use_clahe,
+            downscale_size=args.img_size,
+            angle_bin_width=args.angle_bin_width,
+            num_angle_bins=args.num_angle_bins
         )
-        val_dataset = MPIIFaceGazeDataset(
-            dataset_path=args.data_dir, 
-            participant_ids=val_ids, 
+        val_dataset = MPIIFaceGazeMatDataset(
+            dataset_path=args.data_dir,
+            participant_ids=val_ids,
             transform=val_transform,
-            is_train=False,
-            use_cache=args.use_cache,
             input_channels=args.input_channels,
-            use_clahe=args.use_clahe
+            use_cache=args.use_cache,
+            downscale_size=args.img_size,
+            angle_bin_width=args.angle_bin_width,
+            num_angle_bins=args.num_angle_bins
         )
         landmark_key = 'facial_landmarks'
         

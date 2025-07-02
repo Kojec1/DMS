@@ -6,3 +6,4 @@ matplotlib
 Pillow
 dlib
 opencv-python
+h5py
