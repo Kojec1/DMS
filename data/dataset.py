@@ -713,6 +713,7 @@ class MPIIFaceGazeMatDataset(BaseDataset):
                  use_cache: bool = False,
                  use_clahe: bool = False,
                  downscale_size: int | tuple[int, int] | None = 224,
+                 horizontal_flip: bool = False,
                  angle_bin_width: float = 3.0,
                  num_angle_bins: int = 14):
         super().__init__(transform)
@@ -721,6 +722,7 @@ class MPIIFaceGazeMatDataset(BaseDataset):
         self.use_cache = use_cache
         self.use_clahe = use_clahe
         self.downscale_size = downscale_size
+        self.horizontal_flip = horizontal_flip
         self.angle_bin_width = angle_bin_width
         self.num_angle_bins = num_angle_bins
 
@@ -798,9 +800,6 @@ class MPIIFaceGazeMatDataset(BaseDataset):
                 landmarks_np[:, 0] *= scale_x
                 landmarks_np[:, 1] *= scale_y
                 effective_width, effective_height = target_size[1], target_size[0]
-
-            # Normalize landmarks
-            landmarks_np = normalize_landmarks(landmarks_np, effective_width, effective_height)
 
             # Store in cache
             self.image_cache[cache_key] = (
@@ -903,8 +902,9 @@ class MPIIFaceGazeMatDataset(BaseDataset):
                 landmarks_np[:, 1] *= scale_y
                 effective_width, effective_height = target_size[1], target_size[0]
 
-            # Landmark normalisation to [0,1]
-            landmarks_np = normalize_landmarks(landmarks_np, effective_width, effective_height)
+        # Horizontal flip (Optional)
+        if self.horizontal_flip and random.random() > 0.5:
+            img_pil, landmarks_np = horizontal_flip(img_pil, landmarks_np, img_pil.size[0])
 
         # Apply transform
         item = {}

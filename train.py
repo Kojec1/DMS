@@ -390,6 +390,7 @@ def main():
             use_cache=args.use_cache,
             use_clahe=args.use_clahe,
             downscale_size=args.img_size,
+            horizontal_flip=args.flip_aug,
             angle_bin_width=args.angle_bin_width,
             num_angle_bins=args.num_angle_bins
         )
