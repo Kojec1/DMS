@@ -775,14 +775,15 @@ class MPIIFaceGazeMatDataset(BaseDataset):
             img_pil, gaze_2d_angles_np, head_pose_angles_np, landmarks_np = self._load_from_mat(
                 file_info['path'], local_idx)
 
-            # Apply all preprocessing steps
-            if self.use_clahe:
-                img_pil = apply_clahe(img_pil)
-
+            # Grayscale conversion (optional)
             if self.input_channels == 1 and img_pil.mode != 'L':
                 img_pil = img_pil.convert('L')
             elif self.input_channels == 3 and img_pil.mode != 'RGB':
                 img_pil = img_pil.convert('RGB')
+
+            # CLAHE (optional)
+            if self.use_clahe:
+                img_pil = apply_clahe(img_pil)
 
             # Down-scaling
             effective_width, effective_height = img_pil.size
