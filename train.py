@@ -491,7 +491,7 @@ def main():
 
     # Optimized DataLoader settings for reduced CPU overhead
     persistent_workers = args.persistent_workers and args.num_workers > 0
-    
+    prefetch_factor = args.prefetch_factor if args.prefetch_factor > 0 else None
     train_loader = DataLoader(
         train_dataset, 
         batch_size=args.batch_size, 
@@ -499,7 +499,7 @@ def main():
         num_workers=args.num_workers, 
         pin_memory=True, 
         drop_last=True,
-        prefetch_factor=args.prefetch_factor, 
+        prefetch_factor=prefetch_factor, 
         persistent_workers=persistent_workers
     )
     val_loader = DataLoader(
@@ -508,7 +508,7 @@ def main():
         shuffle=False, 
         num_workers=args.num_workers, 
         pin_memory=True,
-        prefetch_factor=args.prefetch_factor, 
+        prefetch_factor=prefetch_factor, 
         persistent_workers=persistent_workers
     )
 

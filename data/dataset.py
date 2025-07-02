@@ -9,6 +9,7 @@ from .augmentation import horizontal_flip, normalize_landmarks, crop_to_content,
 import cv2
 import h5py
 import bisect
+from tqdm import tqdm
 
 class BaseDataset(Dataset):
     """Base PyTorch Dataset template. Custom datasets should inherit from this class."""
@@ -750,16 +751,63 @@ class MPIIFaceGazeMatDataset(BaseDataset):
         # Workaround for compatibility with the training code
         self.samples = list(range(self.total_samples))
 
+        # Pre-compute cumulative starts to locate a sample with bisect.
+        self._cumulative_starts = [info['cumulative_start'] for info in self.files] + [self.total_samples]
+
         # Optional in-memory cache for PIL images keyed by (file_path, local_idx)
         if self.use_cache:
             self.image_cache: dict[tuple[str, int], Image.Image] = {}
             print("Image caching enabled for MPIIFaceGazeMatDataset.")
+            self._preload_cache()
+            print(f"Pre-loaded {len(self.image_cache)} images into cache.")
 
-        # Pre-compute cumulative starts to locate a sample with bisect.
-        self._cumulative_starts = [info['cumulative_start'] for info in self.files] + [self.total_samples]
+    def _preload_cache(self):
+        """Pre-load all images and labels into cache during initialization."""
+        for global_idx in tqdm(range(self.total_samples), desc="Loading images to cache"):
+            file_info, local_idx = self._locate_sample(global_idx)
+            cache_key = (file_info['path'], local_idx)
+            
+            # Skip if already cached (shouldn't happen during init, but safety check)
+            if cache_key in self.image_cache:
+                continue
+                
+            # Load raw data
+            img_pil, gaze_2d_angles_np, head_pose_angles_np, landmarks_np = self._load_from_mat(
+                file_info['path'], local_idx)
 
-    def __len__(self):
-        return self.total_samples
+            # Apply all preprocessing steps
+            if self.use_clahe:
+                img_pil = apply_clahe(img_pil)
+
+            if self.input_channels == 1 and img_pil.mode != 'L':
+                img_pil = img_pil.convert('L')
+            elif self.input_channels == 3 and img_pil.mode != 'RGB':
+                img_pil = img_pil.convert('RGB')
+
+            # Down-scaling
+            effective_width, effective_height = img_pil.size
+            if self.downscale_size is not None:
+                if isinstance(self.downscale_size, int):
+                    target_size = (self.downscale_size, self.downscale_size)
+                else:
+                    target_size = self.downscale_size
+                scale_x = target_size[1] / effective_width
+                scale_y = target_size[0] / effective_height
+                img_pil = img_pil.resize(target_size, Image.BILINEAR)
+                landmarks_np[:, 0] *= scale_x
+                landmarks_np[:, 1] *= scale_y
+                effective_width, effective_height = target_size[1], target_size[0]
+
+            # Normalize landmarks
+            landmarks_np = normalize_landmarks(landmarks_np, effective_width, effective_height)
+
+            # Store in cache
+            self.image_cache[cache_key] = (
+                img_pil.copy(),
+                gaze_2d_angles_np.copy(),
+                head_pose_angles_np.copy(),
+                landmarks_np.copy(),
+            )
 
     def _locate_sample(self, global_idx: int) -> tuple[dict, int]:
         """Return (file_info_dict, local_idx) for the *global* dataset index."""
@@ -806,13 +854,18 @@ class MPIIFaceGazeMatDataset(BaseDataset):
 
         return idx
 
+    def __len__(self):
+        return self.total_samples
+
     def __getitem__(self, index):
         # Locate sample
         file_info, local_idx = self._locate_sample(index)
         cache_key = (file_info['path'], local_idx)
-        cached = self.use_cache and cache_key in getattr(self, 'image_cache', {})
-
-        if cached:
+        if self.use_cache:
+            # All images are pre-cached during initialization
+            if cache_key not in self.image_cache:
+                raise RuntimeError(f"Cache miss for pre-loaded data at index {index}. This should not happen.")
+            
             # Retrieve fully-processed data
             img_pil, gaze_2d_angles_np, head_pose_angles_np, landmarks_np = self.image_cache[cache_key]
 
@@ -851,15 +904,6 @@ class MPIIFaceGazeMatDataset(BaseDataset):
 
             # Landmark normalisation to [0,1]
             landmarks_np = normalize_landmarks(landmarks_np, effective_width, effective_height)
-
-            # Cache the processed objects
-            if self.use_cache:
-                self.image_cache[cache_key] = (
-                    img_pil.copy(),
-                    gaze_2d_angles_np.copy(),
-                    head_pose_angles_np.copy(),
-                    landmarks_np.copy(),
-                )
 
         # Apply transform
         item = {}
