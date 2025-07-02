@@ -399,6 +399,7 @@ def main():
             transform=val_transform,
             input_channels=args.input_channels,
             use_cache=args.use_cache,
+            use_clahe=args.use_clahe,
             downscale_size=args.img_size,
             angle_bin_width=args.angle_bin_width,
             num_angle_bins=args.num_angle_bins
