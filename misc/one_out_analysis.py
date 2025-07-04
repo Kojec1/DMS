@@ -73,7 +73,7 @@ def create_visualization(root_dir: str, output_path: str = None):
     
     # Create figure with subplots (5 rows, 2 columns)
     fig, axes = plt.subplots(5, 2, figsize=(16, 20))
-    fig.suptitle(f'Training Analysis - {len(all_histories)} Runs', fontsize=16, fontweight='bold')
+    fig.suptitle(f'Training Analysis - {len(all_histories)} Participants', fontsize=16, fontweight='bold')
     
     # Colors for different runs
     colors = plt.cm.tab10(np.linspace(0, 1, len(all_histories)))
@@ -100,7 +100,7 @@ def create_visualization(root_dir: str, output_path: str = None):
             if train_key in history and history[train_key]:
                 epochs = range(1, len(history[train_key]) + 1)
                 ax_train.plot(epochs, history[train_key], color=colors[j], alpha=0.7, 
-                             label=f'Run {j+1}' if row == 0 else "")
+                             label=f'P{j+1}' if row == 0 else "")
         
         ax_train.set_title(train_title, fontweight='bold')
         ax_train.set_xlabel('Epoch')
@@ -131,10 +131,10 @@ def create_visualization(root_dir: str, output_path: str = None):
     
     # Plot 7-10: Bar charts
     bar_configs = [
-        ('train_landmark_nme', 'Train Landmark NME at Best Val Loss', 3, 0),
-        ('val_landmark_nme', 'Val Landmark NME at Best Val Loss', 3, 1),
-        ('train_ang_error', 'Train Angular Error at Best Val Loss', 4, 0),
-        ('val_ang_error', 'Val Angular Error at Best Val Loss', 4, 1)
+        ('train_landmark_nme', 'Train Landmark NME', 2, 0),
+        ('val_landmark_nme', 'Val Landmark NME', 2, 1),
+        ('train_ang_error', 'Train Angular Error', 3, 0),
+        ('val_ang_error', 'Val Angular Error', 3, 1)
     ]
     
     for key, title, row, col in bar_configs:
@@ -163,7 +163,7 @@ def create_visualization(root_dir: str, output_path: str = None):
             ax.grid(True, alpha=0.3, axis='y')
             
             # Set x-axis labels
-            x_labels = [f'Run {i}' for i in range(1, n_runs + 1)] + ['Average']
+            x_labels = [f'P{i}' for i in range(1, n_runs + 1)] + ['Avg']
             ax.set_xticks(x_positions)
             ax.set_xticklabels(x_labels, rotation=45, ha='right')
             
