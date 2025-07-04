@@ -713,6 +713,7 @@ class MPIIFaceGazeMatDataset(BaseDataset):
                  use_cache: bool = False,
                  use_clahe: bool = False,
                  downscale_size: int | tuple[int, int] | None = 224,
+                 affine_aug: bool = False,
                  horizontal_flip: bool = False,
                  angle_bin_width: float = 3.0,
                  num_angle_bins: int = 14):
@@ -722,6 +723,7 @@ class MPIIFaceGazeMatDataset(BaseDataset):
         self.use_cache = use_cache
         self.use_clahe = use_clahe
         self.downscale_size = downscale_size
+        self.affine_aug = affine_aug
         self.horizontal_flip = horizontal_flip
         self.angle_bin_width = angle_bin_width
         self.num_angle_bins = num_angle_bins
@@ -768,11 +770,7 @@ class MPIIFaceGazeMatDataset(BaseDataset):
         for global_idx in tqdm(range(self.total_samples), desc="Loading images to cache"):
             file_info, local_idx = self._locate_sample(global_idx)
             cache_key = (file_info['path'], local_idx)
-            
-            # Skip if already cached (shouldn't happen during init, but safety check)
-            if cache_key in self.image_cache:
-                continue
-                
+
             # Load raw data
             img_pil, gaze_2d_angles_np, head_pose_angles_np, landmarks_np = self._load_from_mat(
                 file_info['path'], local_idx)
@@ -901,6 +899,17 @@ class MPIIFaceGazeMatDataset(BaseDataset):
                 landmarks_np[:, 0] *= scale_x
                 landmarks_np[:, 1] *= scale_y
                 effective_width, effective_height = target_size[1], target_size[0]
+
+        # Affine Augmentation
+        if self.affine_aug and random.random() > 0.5:
+            img_pil, landmarks_np, gaze_2d_angles_np, _ = random_affine_with_landmarks(
+                img_pil, 
+                landmarks_np, 
+                gaze_2d_angles_np,
+                degrees=(-10, 10),
+                translate_fractions=(0.1, 0.1),
+                scale_range=(0.8, 1.2)
+            )
 
         # Horizontal flip (Optional)
         if self.horizontal_flip and random.random() > 0.5:

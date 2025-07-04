@@ -185,7 +185,6 @@ def random_affine_with_landmarks(image, landmarks_np, gaze_2d_angles_np=None, ga
     """
     Applies random affine transformation (rotation, translation, scale) to the image 
     and adjusts landmarks and gaze accordingly.
-    Supports both 2D gaze angles and 3D gaze direction vectors.
     """
     original_width, original_height = image.size
     center_x, center_y = original_width / 2.0, original_height / 2.0
@@ -200,19 +199,16 @@ def random_affine_with_landmarks(image, landmarks_np, gaze_2d_angles_np=None, ga
     
     scale_factor = random.uniform(scale_range[0], scale_range[1])
 
-    shear_params = [0.0, 0.0] # Default no shear
-
     # Apply affine transformation to the image
     transformed_image = TF.affine(image, 
                                   angle=angle, 
                                   translate=(translate_x, translate_y), 
-                                  scale=scale_factor, 
-                                  shear=shear_params)
+                                  scale=scale_factor)
 
     # Transform landmarks
     adjusted_landmarks = landmarks_np.copy().astype(np.float32)
 
-    # Translate to origin (center of image) for scale/rotation/shear
+    # Translate to origin (center of image) for scale/rotation
     adjusted_landmarks[:, 0] -= center_x
     adjusted_landmarks[:, 1] -= center_y
 
@@ -220,7 +216,7 @@ def random_affine_with_landmarks(image, landmarks_np, gaze_2d_angles_np=None, ga
     adjusted_landmarks *= scale_factor
 
     # Rotate
-    angle_rad = math.radians(angle) # Use positive angle here as we are rotating points forward
+    angle_rad = math.radians(angle)
     cos_a = math.cos(angle_rad)
     sin_a = math.sin(angle_rad)
     
@@ -232,6 +228,10 @@ def random_affine_with_landmarks(image, landmarks_np, gaze_2d_angles_np=None, ga
     # Translate back from origin and apply final translation
     adjusted_landmarks[:, 0] += center_x + translate_x
     adjusted_landmarks[:, 1] += center_y + translate_y
+
+    # Clip landmarks to be within the image dimensions
+    adjusted_landmarks[:, 0] = np.clip(adjusted_landmarks[:, 0], 0, original_width - 1)
+    adjusted_landmarks[:, 1] = np.clip(adjusted_landmarks[:, 1], 0, original_height - 1)
     
     # Adjust 2D gaze if provided
     adjusted_gaze_2d_np = None
@@ -244,8 +244,9 @@ def random_affine_with_landmarks(image, landmarks_np, gaze_2d_angles_np=None, ga
         y = -math.sin(pitch)
         z = -math.cos(pitch) * math.cos(yaw)
         
-        x_new = x * cos_a - y * sin_a
-        y_new = x * sin_a + y * cos_a
+        # Counter-clockwise rotation
+        x_new = x * cos_a + y * sin_a
+        y_new = -x * sin_a + y * cos_a
         z_new = z
         
         # Convert the new 3D vector back to (pitch, yaw) format.
@@ -273,10 +274,6 @@ def random_affine_with_landmarks(image, landmarks_np, gaze_2d_angles_np=None, ga
         adjusted_gaze_3d_np[0] = x_3d_new
         adjusted_gaze_3d_np[1] = y_3d_new
         adjusted_gaze_3d_np[2] = z_3d_new
-    
-    # Clip landmarks to be within the image dimensions
-    adjusted_landmarks[:, 0] = np.clip(adjusted_landmarks[:, 0], 0, original_width - 1)
-    adjusted_landmarks[:, 1] = np.clip(adjusted_landmarks[:, 1], 0, original_height - 1)
 
     return transformed_image, adjusted_landmarks, adjusted_gaze_2d_np, adjusted_gaze_3d_np
 
