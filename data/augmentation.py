@@ -203,7 +203,8 @@ def random_affine_with_landmarks(image, landmarks_np, gaze_2d_angles_np=None, ga
     transformed_image = TF.affine(image, 
                                   angle=angle, 
                                   translate=(translate_x, translate_y), 
-                                  scale=scale_factor)
+                                  scale=scale_factor,
+                                  shear=(0, 0))
 
     # Transform landmarks
     adjusted_landmarks = landmarks_np.copy().astype(np.float32)
