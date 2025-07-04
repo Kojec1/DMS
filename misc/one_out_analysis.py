@@ -71,12 +71,9 @@ def create_visualization(root_dir: str, output_path: str = None):
         print("No valid training histories found")
         return
     
-    # Create figure with subplots
-    fig, axes = plt.subplots(2, 5, figsize=(25, 12))
+    # Create figure with subplots (5 rows, 2 columns)
+    fig, axes = plt.subplots(5, 2, figsize=(16, 20))
     fig.suptitle(f'Training Analysis - {len(all_histories)} Runs', fontsize=16, fontweight='bold')
-    
-    # Flatten axes for easier indexing
-    axes = axes.flatten()
     
     # Colors for different runs
     colors = plt.cm.tab10(np.linspace(0, 1, len(all_histories)))
@@ -89,32 +86,41 @@ def create_visualization(root_dir: str, output_path: str = None):
         'val_ang_error': []
     }
     
-    # Plot 1-6: Loss curves
-    loss_keys = [
-        ('train_total_loss', 'Train Total Loss'),
-        ('val_total_loss', 'Val Total Loss'),
-        ('train_landmark_loss', 'Train Landmark Loss'),
-        ('val_landmark_loss', 'Val Landmark Loss'),
-        ('train_gaze_loss', 'Train Gaze Loss'),
-        ('val_gaze_loss', 'Val Gaze Loss')
+    # Plot 1-6: Loss curves (arranged in pairs)
+    loss_pairs = [
+        (('train_total_loss', 'Train Total Loss'), ('val_total_loss', 'Val Total Loss')),
+        (('train_landmark_loss', 'Train Landmark Loss'), ('val_landmark_loss', 'Val Landmark Loss')),
+        (('train_gaze_loss', 'Train Gaze Loss'), ('val_gaze_loss', 'Val Gaze Loss'))
     ]
     
-    for i, (key, title) in enumerate(loss_keys):
-        ax = axes[i]
-        
+    for row, ((train_key, train_title), (val_key, val_title)) in enumerate(loss_pairs):
+        # Train loss (left column)
+        ax_train = axes[row, 0]
         for j, (file_path, history) in enumerate(all_histories):
-            if key in history and history[key]:
-                epochs = range(1, len(history[key]) + 1)
-                ax.plot(epochs, history[key], color=colors[j], alpha=0.7, 
-                       label=f'Run {j+1}' if i == 0 else "")
+            if train_key in history and history[train_key]:
+                epochs = range(1, len(history[train_key]) + 1)
+                ax_train.plot(epochs, history[train_key], color=colors[j], alpha=0.7, 
+                             label=f'Run {j+1}' if row == 0 else "")
         
-        ax.set_title(title, fontweight='bold')
-        ax.set_xlabel('Epoch')
-        ax.set_ylabel('Loss')
-        ax.grid(True, alpha=0.3)
+        ax_train.set_title(train_title, fontweight='bold')
+        ax_train.set_xlabel('Epoch')
+        ax_train.set_ylabel('Loss')
+        ax_train.grid(True, alpha=0.3)
         
-        if i == 0:  # Add legend only to first subplot
-            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        if row == 0:  # Add legend only to first subplot
+            ax_train.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        
+        # Val loss (right column)
+        ax_val = axes[row, 1]
+        for j, (file_path, history) in enumerate(all_histories):
+            if val_key in history and history[val_key]:
+                epochs = range(1, len(history[val_key]) + 1)
+                ax_val.plot(epochs, history[val_key], color=colors[j], alpha=0.7)
+        
+        ax_val.set_title(val_title, fontweight='bold')
+        ax_val.set_xlabel('Epoch')
+        ax_val.set_ylabel('Loss')
+        ax_val.grid(True, alpha=0.3)
     
     # Extract metrics at best validation loss for each run
     for file_path, history in all_histories:
@@ -123,31 +129,44 @@ def create_visualization(root_dir: str, output_path: str = None):
             if key in metrics:
                 best_metrics[key].append(metrics[key])
     
-    # Plot 7-10: Histograms
-    histogram_configs = [
-        ('train_landmark_nme', 'Train Landmark NME at Best Val Loss', 6),
-        ('val_landmark_nme', 'Val Landmark NME at Best Val Loss', 7),
-        ('train_ang_error', 'Train Angular Error at Best Val Loss', 8),
-        ('val_ang_error', 'Val Angular Error at Best Val Loss', 9)
+    # Plot 7-10: Bar charts
+    bar_configs = [
+        ('train_landmark_nme', 'Train Landmark NME at Best Val Loss', 3, 0),
+        ('val_landmark_nme', 'Val Landmark NME at Best Val Loss', 3, 1),
+        ('train_ang_error', 'Train Angular Error at Best Val Loss', 4, 0),
+        ('val_ang_error', 'Val Angular Error at Best Val Loss', 4, 1)
     ]
     
-    for key, title, idx in histogram_configs:
-        ax = axes[idx]
+    for key, title, row, col in bar_configs:
+        ax = axes[row, col]
         
         if best_metrics[key]:
             data = best_metrics[key]
-            ax.hist(data, bins=max(5, len(data)//2), alpha=0.7, color='skyblue', edgecolor='black')
-            
-            # Add average line
+            n_runs = len(data)
             avg_val = np.mean(data)
-            ax.axvline(avg_val, color='red', linestyle='--', linewidth=2, 
-                      label=f'Avg: {avg_val:.4f}')
+            
+            # Create bar chart with run indices + average
+            x_positions = list(range(1, n_runs + 1)) + [n_runs + 1.5]  # Gap before average
+            y_values = data + [avg_val]
+            bar_colors = ['skyblue'] * n_runs + ['red']
+            
+            bars = ax.bar(x_positions, y_values, color=bar_colors, alpha=0.7, edgecolor='black')
+            
+            # Add value labels on bars
+            for i, (x, y) in enumerate(zip(x_positions, y_values)):
+                ax.text(x, y + max(y_values) * 0.01, f'{y:.4f}', 
+                       ha='center', va='bottom', fontsize=9)
             
             ax.set_title(title, fontweight='bold')
-            ax.set_xlabel('Value')
-            ax.set_ylabel('Frequency')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
+            ax.set_xlabel('Run Index')
+            ax.set_ylabel('Value')
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            # Set x-axis labels
+            x_labels = [f'Run {i}' for i in range(1, n_runs + 1)] + ['Average']
+            ax.set_xticks(x_positions)
+            ax.set_xticklabels(x_labels, rotation=45, ha='right')
+            
         else:
             ax.text(0.5, 0.5, 'No data available', transform=ax.transAxes, 
                    ha='center', va='center', fontsize=12)
