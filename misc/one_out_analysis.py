@@ -131,10 +131,10 @@ def create_visualization(root_dir: str, output_path: str = None):
     
     # Plot 7-10: Bar charts
     bar_configs = [
-        ('train_landmark_nme', 'Train Landmark NME', 2, 0),
-        ('val_landmark_nme', 'Val Landmark NME', 2, 1),
-        ('train_ang_error', 'Train Angular Error', 3, 0),
-        ('val_ang_error', 'Val Angular Error', 3, 1)
+        ('train_landmark_nme', 'Train Landmark NME', 3, 0),
+        ('val_landmark_nme', 'Val Landmark NME', 3, 1),
+        ('train_ang_error', 'Train Angular Error', 4, 0),
+        ('val_ang_error', 'Val Angular Error', 4, 1)
     ]
     
     for key, title, row, col in bar_configs:
@@ -158,7 +158,7 @@ def create_visualization(root_dir: str, output_path: str = None):
                        ha='center', va='bottom', fontsize=9)
             
             ax.set_title(title, fontweight='bold')
-            ax.set_xlabel('Run Index')
+            ax.set_xlabel('Participant Index')
             ax.set_ylabel('Value')
             ax.grid(True, alpha=0.3, axis='y')
             
