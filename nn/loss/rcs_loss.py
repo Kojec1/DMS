@@ -66,11 +66,13 @@ class RCSLoss(nn.Module):
         angle_target = angle_target.squeeze()
         bin_target = self._angle_to_bin(angle_target)
 
+        # Apply softmax to get probabilities
+        probs = F.softmax(logits, dim=1)
+
         # Classification term (cross-entropy)
-        cls_loss = self.ce_loss(logits, bin_target)
+        cls_loss = self.ce_loss(probs, bin_target)
 
         # Regression term
-        probs = F.softmax(logits, dim=1)
         offsets = self._offsets.to(logits.device)
         # Expected angle in bin units then scale by bin width
         expected = self.bin_width * torch.sum(probs * offsets, dim=1)
