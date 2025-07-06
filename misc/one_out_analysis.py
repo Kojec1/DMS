@@ -6,9 +6,16 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import List, Dict, Any
 import warnings
+import re
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
+
+
+def extract_run_index(file_path: str) -> int:
+    """Extract the numeric run index from a path containing 'run_val_<idx>'."""
+    match = re.search(r"run_val_(\d+)", str(file_path))
+    return int(match.group(1)) if match else -1
 
 def find_training_history_files(root_dir: str) -> List[str]:
     """Recursively find all training_history.json files in the given directory."""
@@ -17,6 +24,8 @@ def find_training_history_files(root_dir: str) -> List[str]:
     
     for file_path in root_path.rglob('training_history.json'):
         history_files.append(str(file_path))
+    
+    history_files.sort(key=extract_run_index)
     
     return history_files
 
@@ -99,8 +108,14 @@ def create_visualization(root_dir: str, output_path: str = None):
         for j, (file_path, history) in enumerate(all_histories):
             if train_key in history and history[train_key]:
                 epochs = range(1, len(history[train_key]) + 1)
-                ax_train.plot(epochs, history[train_key], color=colors[j], alpha=0.7, 
-                             label=f'P{j+1}' if row == 0 else "")
+                run_idx = extract_run_index(file_path)
+                ax_train.plot(
+                    epochs,
+                    history[train_key],
+                    color=colors[j],
+                    alpha=0.7,
+                    label=f'P{run_idx}' if row == 0 else "",
+                )
         
         ax_train.set_title(train_title, fontweight='bold')
         ax_train.set_xlabel('Epoch')
@@ -163,7 +178,8 @@ def create_visualization(root_dir: str, output_path: str = None):
             ax.grid(True, alpha=0.3, axis='y')
             
             # Set x-axis labels
-            x_labels = [f'P{i}' for i in range(1, n_runs + 1)] + ['Avg']
+            first_run_idx = extract_run_index(history_files[0]) if history_files else 0
+            x_labels = [f'P{extract_run_index(history_files[i])}' for i in range(n_runs)] + ['Avg']
             ax.set_xticks(x_positions)
             ax.set_xticklabels(x_labels, rotation=45, ha='right')
             
