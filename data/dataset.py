@@ -729,7 +729,7 @@ class MPIIFaceGazeMatDataset(BaseDataset):
         self.angle_bin_width = angle_bin_width
         self.num_angle_bins = num_angle_bins
         self.label_smoothing = label_smoothing
-        
+
         if participant_ids is None:
             participant_ids = list(range(15))
 
@@ -918,7 +918,7 @@ class MPIIFaceGazeMatDataset(BaseDataset):
             img_pil, landmarks_np, gaze_2d_angles_np, _ = horizontal_flip(img_pil, landmarks_np, gaze_2d_angles_np, img_pil.size[0])
 
         # Normalize landmarks
-        landmarks_np = normalize_landmarks(landmarks_np, effective_width, effective_height)
+        landmarks_np = normalize_landmarks(landmarks_np, img_pil.size[0], img_pil.size[1])
 
         # Apply label smoothing
         if self.label_smoothing > 0:
