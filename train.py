@@ -403,7 +403,8 @@ def main():
             affine_aug=args.affine_aug,
             horizontal_flip=args.flip_aug,
             angle_bin_width=args.angle_bin_width,
-            num_angle_bins=args.num_angle_bins
+            num_angle_bins=args.num_angle_bins,
+            label_smoothing=args.label_smoothing
         )
         val_dataset = MPIIFaceGazeMatDataset(
             dataset_path=args.data_dir,
