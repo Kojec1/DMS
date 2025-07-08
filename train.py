@@ -9,7 +9,7 @@ import time
 from tqdm import tqdm
 
 from nn.modules.model import MHModel
-from nn.loss import SmoothWingLoss, RCSLoss
+from nn.loss import SmoothWingLoss, RCSLoss, AutomaticWeightedLoss
 from nn.metrics import NME, angular_error
 from data.dataset import MPIIFaceGazeMatDataset, WFLWDataset, Face300WDataset
 from utils.visualization import plot_training_history
@@ -105,7 +105,7 @@ def get_args():
 
 
 # Training and Validation
-def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_criterion, optimizer, scaler, device, epoch, args, landmark_key):
+def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_criterion, optimizer, scaler, device, epoch, args, landmark_key, awl):
     """Training loop for one epoch supporting landmarks and yaw/pitch gaze classification."""
     model.train()
 
@@ -135,13 +135,10 @@ def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_
         with torch.amp.autocast(device_type='cuda', enabled=args.amp):
             pred_landmarks, yaw_logits, pitch_logits = model(images)
 
-            total_loss = torch.tensor(0.0, device=device)
-
             # Landmark loss (SmoothWingLoss)
             landmark_loss = torch.tensor(0.0, device=device)
             if 'landmarks' in args.training_modes:
                 landmark_loss = landmark_criterion(pred_landmarks, gt_landmarks_flat)
-                total_loss += args.landmark_loss_weight * landmark_loss
 
             # Gaze loss (yaw + pitch RCS)
             gaze_loss = torch.tensor(0.0, device=device)
@@ -149,7 +146,15 @@ def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_
                 yaw_loss = yaw_criterion(yaw_logits, gt_yaw_deg)
                 pitch_loss = pitch_criterion(pitch_logits, gt_pitch_deg)
                 gaze_loss = (yaw_loss + pitch_loss) * 0.5  # average
-                total_loss += args.gaze_loss_weight * gaze_loss
+
+            # Loss balancing
+            losses_for_awl = []
+            if 'landmarks' in args.training_modes:
+                losses_for_awl.append(landmark_loss)
+            if 'gaze' in args.training_modes:
+                losses_for_awl.append(gaze_loss)
+
+            total_loss = awl(*losses_for_awl)
 
         # Back-prop
         if args.amp:
@@ -203,7 +208,7 @@ def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_
         (angular_err_accum / num_samples).item(),
     )
 
-def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criterion, device, args, landmark_key):
+def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criterion, device, args, landmark_key, awl):
     """Validation loop for one epoch supporting landmarks and yaw/pitch gaze classification."""
     model.eval()
 
@@ -231,13 +236,10 @@ def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criteri
             with torch.amp.autocast(device_type='cuda', enabled=args.amp):
                 pred_landmarks, yaw_logits, pitch_logits = model(images)
 
-                total_loss = torch.tensor(0.0, device=device)
-
                 # Landmark loss (SmoothWingLoss)
                 landmark_loss = torch.tensor(0.0, device=device)
                 if 'landmarks' in args.training_modes:
                     landmark_loss = landmark_criterion(pred_landmarks, gt_landmarks_flat)
-                    total_loss += args.landmark_loss_weight * landmark_loss
 
                 # Gaze loss (yaw + pitch RCS)
                 gaze_loss = torch.tensor(0.0, device=device)
@@ -245,7 +247,15 @@ def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criteri
                     yaw_loss = yaw_criterion(yaw_logits, gt_yaw_deg)
                     pitch_loss = pitch_criterion(pitch_logits, gt_pitch_deg)
                     gaze_loss = (yaw_loss + pitch_loss) * 0.5
-                    total_loss += args.gaze_loss_weight * gaze_loss
+
+                # Loss balancing
+                losses_for_awl = []
+                if 'landmarks' in args.training_modes:
+                    losses_for_awl.append(landmark_loss)
+                if 'gaze' in args.training_modes:
+                    losses_for_awl.append(gaze_loss)
+
+                total_loss = awl(*losses_for_awl)
 
             # Metrics accumulation
             total_loss_accum += total_loss.detach()
@@ -533,7 +543,12 @@ def main():
     landmark_criterion = SmoothWingLoss() # Smooth Wing Loss for landmark regression
     yaw_criterion = RCSLoss(num_bins=args.num_angle_bins, bin_width=args.angle_bin_width, alpha=1.0, regression='mae').to(device)
     pitch_criterion = RCSLoss(num_bins=args.num_angle_bins, bin_width=args.angle_bin_width, alpha=1.0, regression='mae').to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    
+    # Uncertainty-based automatic weighting for multi-task loss
+    awl = AutomaticWeightedLoss(num_tasks=len(args.training_modes)).to(device)
+
+    # Optimiser now updates both model parameters and σ parameters of AWL
+    optimizer = optim.AdamW(list(model.parameters()) + list(awl.parameters()), lr=args.lr, weight_decay=args.weight_decay)
     
     # Learning Rate Scheduler, will be initialized considering warmup
     scheduler = None # Initialize later
@@ -630,8 +645,8 @@ def main():
         
         history['lr'].append(optimizer.param_groups[0]['lr'])  # Record LR for the epoch
 
-        train_total_loss, train_lmk_loss, train_gaze_loss, train_nme, train_ang_err = train_one_epoch(model, train_loader, landmark_criterion, yaw_criterion, pitch_criterion, optimizer, scaler, device, epoch, args, landmark_key)
-        val_total_loss, val_lmk_loss, val_gaze_loss, val_nme, val_ang_err = validate(model, val_loader, landmark_criterion, yaw_criterion, pitch_criterion, device, args, landmark_key)
+        train_total_loss, train_lmk_loss, train_gaze_loss, train_nme, train_ang_err = train_one_epoch(model, train_loader, landmark_criterion, yaw_criterion, pitch_criterion, optimizer, scaler, device, epoch, args, landmark_key, awl)
+        val_total_loss, val_lmk_loss, val_gaze_loss, val_nme, val_ang_err = validate(model, val_loader, landmark_criterion, yaw_criterion, pitch_criterion, device, args, landmark_key, awl)
         
         # Step the scheduler if in main training phase (and scheduler exists)
         if not is_warmup_epoch and scheduler is not None:
@@ -667,7 +682,7 @@ def main():
             save_history(history, history_filepath)
             print(f"New best validation loss: {best_val_loss:.6f}. Saved best model to {best_checkpoint_path}")
         
-        print(f"Epoch {epoch+1} Summary: Train Total Loss: {train_total_loss:.4f}, Val Total Loss: {val_total_loss:.4f}, Train NME: {train_nme:.4f}, Val NME: {val_nme:.4f}, Train AngErr: {train_ang_err:.2f}°, Val AngErr: {val_ang_err:.2f}°")
+        print(f"Epoch {epoch+1} Summary: Train Total Loss: {train_total_loss:.4f}, Val Total Loss: {val_total_loss:.4f}, Train NME: {train_nme:.4f}, Val NME: {val_nme:.4f}, Train Angular Error: {train_ang_err:.2f}°, Val Angular Error: {val_ang_err:.2f}°")
 
     print("Training finished.")
     print(f"Best validation loss: {best_val_loss:.6f}")
