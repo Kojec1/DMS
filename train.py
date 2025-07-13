@@ -101,6 +101,10 @@ def get_args():
     parser.add_argument('--right_eye_idx', type=int, default=3,
                         help='Index of right eye landmark for NME calculation')
 
+    # Add new args
+    parser.add_argument('--landmark_init_sigma', type=float, default=0.1, help='Initial sigma for landmark task in AWL')
+    parser.add_argument('--gaze_init_sigma', type=float, default=1.0, help='Initial sigma for gaze task in AWL')
+
     return parser.parse_args()
 
 
@@ -546,7 +550,12 @@ def main():
     pitch_criterion = RCSLoss(num_bins=args.num_angle_bins, bin_width=args.angle_bin_width, alpha=1.0, regression='mae').to(device)
     
     # Uncertainty-based automatic weighting for multi-task loss
-    awl = AutomaticWeightedLoss(num_tasks=len(args.training_modes)).to(device)
+    init_sigmas = []
+    if 'landmarks' in args.training_modes:
+        init_sigmas.append(args.landmark_init_sigma)
+    if 'gaze' in args.training_modes:
+        init_sigmas.append(args.gaze_init_sigma)
+    awl = AutomaticWeightedLoss(num_tasks=len(args.training_modes), init_sigmas=init_sigmas).to(device)
 
     # Optimiser now updates both model parameters and σ parameters of AWL
     optimizer = optim.AdamW(list(model.parameters()) + list(awl.parameters()), lr=args.lr, weight_decay=args.weight_decay)

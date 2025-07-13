@@ -5,11 +5,12 @@ from typing import Optional
 
 class AutomaticWeightedLoss(nn.Module):
     """Automatically weighted multi–task loss (Kendall et al., 2018)."""
-    def __init__(self, num_tasks: int, init_sigma: float = 1.0, dtype: Optional[torch.dtype] = None):
+    def __init__(self, num_tasks: int, init_sigmas: list[float] | float = 1.0, dtype: Optional[torch.dtype] = None):
         super().__init__()
-        # Convert initial sigma to log-space so that sigma = exp(log_sigma) > 0.
-        init_log_sigma = math.log(init_sigma)
-        log_sigma = torch.full((num_tasks,), init_log_sigma, dtype=dtype or torch.get_default_dtype())
+        if isinstance(init_sigmas, (int, float)):
+            init_sigmas = [float(init_sigmas)] * num_tasks
+        init_log_sigmas = [math.log(s) for s in init_sigmas]
+        log_sigma = torch.tensor(init_log_sigmas, dtype=dtype or torch.get_default_dtype())
         self.log_sigma = nn.Parameter(log_sigma, requires_grad=True)
 
     def forward(self, *task_losses: torch.Tensor) -> torch.Tensor:
