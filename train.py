@@ -63,11 +63,15 @@ def get_args():
     parser.add_argument('--freeze_backbone_warmup', action='store_true', help='Freeze backbone weights during warmup phase.')
     
     # Training Mode arguments
-    parser.add_argument('--training_mode', type=str, default='landmarks,gaze', help='Comma-separated training modes. Available modes: landmarks, gaze.')
+    parser.add_argument('--training_mode', type=str, default='landmarks,gaze,head_pose', help='Comma-separated training modes. Available modes: landmarks, gaze, head_pose.')
     parser.add_argument('--landmark_loss_weight', type=float, default=1.0, help='Weight for landmark loss component.')
     parser.add_argument('--gaze_loss_weight', type=float, default=1.0, help='Weight for gaze (yaw+pitch) RCS loss component.')
-    parser.add_argument('--num_angle_bins', type=int, default=14, help='Number of discrete bins for yaw/pitch classification.')
+    parser.add_argument('--num_angle_bins', type=int, default=14, help='Number of discrete bins for gaze yaw/pitch classification.')
     parser.add_argument('--angle_bin_width', type=float, default=3.0, help='Width of each discrete angle bin (degrees).')
+    parser.add_argument('--head_pose_loss_weight', type=float, default=1.0, help='Weight for head pose (theta+phi) RCS loss component.')
+    parser.add_argument('--num_theta_bins', type=int, default=32, help='Number of discrete bins for head pose theta classification.')
+    parser.add_argument('--num_phi_bins', type=int, default=60, help='Number of discrete bins for head pose phi classification.')
+    parser.add_argument('--head_angle_bin_width', type=float, default=3.0, help='Width of each discrete angle bin for head pose (degrees).')
 
     # MPII-specific arguments
     parser.add_argument('--train_participant_ids', type=str, default="0,1,2,3,4,5,6,7,8,9,10,11", 
@@ -102,14 +106,15 @@ def get_args():
                         help='Index of right eye landmark for NME calculation')
 
     # Add new args
-    parser.add_argument('--landmark_init_sigma', type=float, default=0.1, help='Initial sigma for landmark task in AWL')
+    parser.add_argument('--landmark_init_sigma', type=float, default=1.0, help='Initial sigma for landmark task in AWL')
     parser.add_argument('--gaze_init_sigma', type=float, default=1.0, help='Initial sigma for gaze task in AWL')
+    parser.add_argument('--head_pose_init_sigma', type=float, default=1.0, help='Initial sigma for head pose task in AWL')
 
     return parser.parse_args()
 
 
 # Training and Validation
-def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_criterion, optimizer, scaler, device, epoch, args, landmark_key, awl):
+def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_criterion, theta_criterion, phi_criterion, optimizer, scaler, device, epoch, args, landmark_key, awl):
     """Training loop for one epoch supporting landmarks and yaw/pitch gaze classification."""
     model.train()
 
@@ -117,27 +122,36 @@ def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_
     total_loss_accum = torch.tensor(0.0, device=device)
     landmark_loss_accum = torch.tensor(0.0, device=device)
     gaze_loss_accum = torch.tensor(0.0, device=device)
+    head_pose_loss_accum = torch.tensor(0.0, device=device)
     landmark_nme_accum = torch.tensor(0.0, device=device)
     angular_err_accum = torch.tensor(0.0, device=device)
+    head_ang_err_accum = torch.tensor(0.0, device=device)
 
     # Pre-compute offsets for expectation
     bin_width = args.angle_bin_width
     num_bins = args.num_angle_bins
     offsets = torch.arange(num_bins, device=device).float() - (num_bins - 1) / 2.0
+    head_bin_width = args.head_angle_bin_width
+    head_offsets_theta = torch.arange(args.num_theta_bins, device=device).float() - (args.num_theta_bins - 1) / 2.0
+    head_offsets_phi = torch.arange(args.num_phi_bins, device=device).float() - (args.num_phi_bins - 1) / 2.0
 
     for batch_idx, batch_data in tqdm(enumerate(dataloader), total=len(dataloader), desc="Training"):
         images = batch_data['image'].to(device, non_blocking=True)
         gt_landmarks = batch_data[landmark_key].to(device, non_blocking=True)
         gt_landmarks_flat = gt_landmarks.view(images.size(0), -1)
 
-        # Ground-truth gaze angles (radians) → degrees
+        # Ground-truth gaze and head pose angles in degrees
         gt_pitch_deg = torch.rad2deg(batch_data['gaze_2d_angles'][:, 0]).to(device)
         gt_yaw_deg   = torch.rad2deg(batch_data['gaze_2d_angles'][:, 1]).to(device)
+
+
+        gt_theta_deg = torch.rad2deg(batch_data['head_pose_angles'][:, 0]).to(device)
+        gt_phi_deg   = torch.rad2deg(batch_data['head_pose_angles'][:, 1]).to(device)
 
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast(device_type='cuda', enabled=args.amp):
-            pred_landmarks, yaw_logits, pitch_logits = model(images)
+            pred_landmarks, yaw_logits, pitch_logits, theta_logits, phi_logits = model(images)
 
             # Landmark loss (SmoothWingLoss)
             landmark_loss = torch.tensor(0.0, device=device)
@@ -149,7 +163,14 @@ def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_
             if 'gaze' in args.training_modes:
                 yaw_loss = yaw_criterion(yaw_logits, gt_yaw_deg)
                 pitch_loss = pitch_criterion(pitch_logits, gt_pitch_deg)
-                gaze_loss = (yaw_loss + pitch_loss) * 0.5  # average
+                gaze_loss = (yaw_loss + pitch_loss) * 0.5
+
+            # Head pose loss (theta + phi RCS)
+            head_pose_loss = torch.tensor(0.0, device=device)
+            if 'head_pose' in args.training_modes:
+                theta_loss = theta_criterion(theta_logits, gt_theta_deg)
+                phi_loss = phi_criterion(phi_logits, gt_phi_deg)
+                head_pose_loss = (theta_loss + phi_loss) * 0.5
 
             # Loss balancing
             losses_for_awl = []
@@ -157,6 +178,8 @@ def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_
                 losses_for_awl.append(landmark_loss)
             if 'gaze' in args.training_modes:
                 losses_for_awl.append(gaze_loss)
+            if 'head_pose' in args.training_modes:
+                losses_for_awl.append(head_pose_loss)
 
             total_loss = awl(*losses_for_awl)
 
@@ -173,6 +196,7 @@ def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_
         total_loss_accum += total_loss.detach()
         landmark_loss_accum += landmark_loss.detach()
         gaze_loss_accum += gaze_loss.detach()
+        head_pose_loss_accum += head_pose_loss.detach()
 
         # Landmark NME
         if 'landmarks' in args.training_modes:
@@ -193,26 +217,41 @@ def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_
         else:
             angular_err_accum += torch.tensor(0.0, device=device)
 
+        # Head pose angular error
+        if 'head_pose' in args.training_modes:
+            soft_theta = torch.softmax(theta_logits.detach(), dim=1)
+            soft_phi = torch.softmax(phi_logits.detach(), dim=1)
+            pred_theta_deg = head_bin_width * torch.sum(soft_theta * head_offsets_theta, dim=1)
+            pred_phi_deg = head_bin_width * torch.sum(soft_phi * head_offsets_phi, dim=1)
+            head_ang_err = angular_error(pred_theta_deg, pred_phi_deg, gt_theta_deg, gt_phi_deg)
+            head_ang_err_accum += head_ang_err.detach() * images.size(0)
+        else:
+            head_ang_err_accum += torch.tensor(0.0, device=device)
+
         # Logging
         if (batch_idx + 1) % args.log_interval == 0 or batch_idx == len(dataloader) - 1:
             processed = (batch_idx + 1) * images.size(0)
             avg_tot = total_loss_accum.item() / (batch_idx + 1)
             avg_lmk = landmark_loss_accum.item() / (batch_idx + 1)
             avg_gaze = gaze_loss_accum.item() / (batch_idx + 1)
+            avg_head_pose = head_pose_loss_accum.item() / (batch_idx + 1)
             avg_ang = angular_err_accum.item() / processed if processed else 0.0
+            avg_head_ang = head_ang_err_accum.item() / processed if processed else 0.0
             print(f"Epoch [{epoch+1}/{args.epochs}] Step [{batch_idx+1}/{len(dataloader)}] "
-                  f"Total loss: {avg_tot:.4f} | Landmark loss: {avg_lmk:.4f} | Gaze loss: {avg_gaze:.4f} | Angular error: {avg_ang:.2f}°")
+                  f"Total loss: {avg_tot:.4f} | Landmark loss: {avg_lmk:.4f} | Gaze loss: {avg_gaze:.4f} | Head Pose loss: {avg_head_pose:.4f} | Angular error: {avg_ang:.2f}° | Head Angular Error: {avg_head_ang:.2f}°")
 
     num_samples = len(dataloader.dataset)
     return (
         (total_loss_accum / len(dataloader)).item(),
         (landmark_loss_accum / len(dataloader)).item(),
         (gaze_loss_accum / len(dataloader)).item(),
+        (head_pose_loss_accum / len(dataloader)).item(),
         (landmark_nme_accum / len(dataloader)).item(),
         (angular_err_accum / num_samples).item(),
+        (head_ang_err_accum / num_samples).item(),
     )
 
-def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criterion, device, args, landmark_key, awl):
+def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criterion, theta_criterion, phi_criterion, device, args, landmark_key, awl):
     """Validation loop for one epoch supporting landmarks and yaw/pitch gaze classification."""
     model.eval()
 
@@ -220,13 +259,18 @@ def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criteri
     total_loss_accum = torch.tensor(0.0, device=device)
     landmark_loss_accum = torch.tensor(0.0, device=device)
     gaze_loss_accum = torch.tensor(0.0, device=device)
+    head_pose_loss_accum = torch.tensor(0.0, device=device)
     landmark_nme_accum = torch.tensor(0.0, device=device)
     angular_err_accum = torch.tensor(0.0, device=device)
+    head_ang_err_accum = torch.tensor(0.0, device=device)
 
     # Pre-compute offsets for expectation
     bin_width = args.angle_bin_width
     num_bins = args.num_angle_bins
     offsets = torch.arange(num_bins, device=device).float() - (num_bins - 1) / 2.0
+    head_bin_width = args.head_angle_bin_width
+    head_offsets_theta = torch.arange(args.num_theta_bins, device=device).float() - (args.num_theta_bins - 1) / 2.0
+    head_offsets_phi = torch.arange(args.num_phi_bins, device=device).float() - (args.num_phi_bins - 1) / 2.0
 
     with torch.no_grad():
         for batch_data in tqdm(dataloader, total=len(dataloader), desc="Validating"):
@@ -237,8 +281,12 @@ def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criteri
             gt_pitch_deg = torch.rad2deg(batch_data['gaze_2d_angles'][:, 0]).to(device)
             gt_yaw_deg   = torch.rad2deg(batch_data['gaze_2d_angles'][:, 1]).to(device)
 
+            # Ground-truth head pose angles (radians) → degrees
+            gt_theta_deg = torch.rad2deg(batch_data['head_pose_angles'][:, 0]).to(device)
+            gt_phi_deg   = torch.rad2deg(batch_data['head_pose_angles'][:, 1]).to(device)
+
             with torch.amp.autocast(device_type='cuda', enabled=args.amp):
-                pred_landmarks, yaw_logits, pitch_logits = model(images)
+                pred_landmarks, yaw_logits, pitch_logits, theta_logits, phi_logits = model(images)
 
                 # Landmark loss (SmoothWingLoss)
                 landmark_loss = torch.tensor(0.0, device=device)
@@ -252,12 +300,21 @@ def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criteri
                     pitch_loss = pitch_criterion(pitch_logits, gt_pitch_deg)
                     gaze_loss = (yaw_loss + pitch_loss) * 0.5
 
+                # Head pose loss (theta + phi RCS)
+                head_pose_loss = torch.tensor(0.0, device=device)
+                if 'head_pose' in args.training_modes:
+                    theta_loss = theta_criterion(theta_logits, gt_theta_deg)
+                    phi_loss = phi_criterion(phi_logits, gt_phi_deg)
+                    head_pose_loss = (theta_loss + phi_loss) * 0.5
+
                 # Loss balancing
                 losses_for_awl = []
                 if 'landmarks' in args.training_modes:
                     losses_for_awl.append(landmark_loss)
                 if 'gaze' in args.training_modes:
                     losses_for_awl.append(gaze_loss)
+                if 'head_pose' in args.training_modes:
+                    losses_for_awl.append(head_pose_loss)
 
                 total_loss = awl(*losses_for_awl)
 
@@ -265,6 +322,7 @@ def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criteri
             total_loss_accum += total_loss.detach()
             landmark_loss_accum += landmark_loss.detach()
             gaze_loss_accum += gaze_loss.detach()
+            head_pose_loss_accum += head_pose_loss.detach()
 
             # Metrics
             if 'landmarks' in args.training_modes:
@@ -280,13 +338,23 @@ def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criteri
                 ang_err = angular_error(pred_pitch_deg, pred_yaw_deg, gt_pitch_deg, gt_yaw_deg)
                 angular_err_accum += ang_err.detach() * images.size(0)
 
+            if 'head_pose' in args.training_modes:
+                soft_theta = torch.softmax(theta_logits.detach(), dim=1)
+                soft_phi = torch.softmax(phi_logits.detach(), dim=1)
+                pred_theta_deg = head_bin_width * torch.sum(soft_theta * head_offsets_theta, dim=1)
+                pred_phi_deg = head_bin_width * torch.sum(soft_phi * head_offsets_phi, dim=1)
+                head_ang_err = angular_error(pred_theta_deg, pred_phi_deg, gt_theta_deg, gt_phi_deg)
+                head_ang_err_accum += head_ang_err.detach() * images.size(0)
+
     num_samples = len(dataloader.dataset)
     return (
         (total_loss_accum / len(dataloader)).item(),
         (landmark_loss_accum / len(dataloader)).item(),
         (gaze_loss_accum / len(dataloader)).item(),
+        (head_pose_loss_accum / len(dataloader)).item(),
         (landmark_nme_accum / len(dataloader)).item(),
         (angular_err_accum / num_samples).item(),
+        (head_ang_err_accum / num_samples).item(),
     )
 
 # Main Function
@@ -307,16 +375,18 @@ def main():
     args.training_modes = [mode.strip() for mode in args.training_mode.split(',')]
     
     # Validate training modes
-    valid_modes = {'landmarks', 'gaze'}
+    valid_modes = {'landmarks', 'gaze', 'head_pose'}
     invalid_modes = set(args.training_modes) - valid_modes
     if invalid_modes:
         print(f"Error: Invalid training modes: {invalid_modes}. Valid modes are: {valid_modes}")
         return
-    
-    # Check for gaze training with non-MPII datasets
-    if args.dataset != 'mpii' and 'gaze' in args.training_modes:
-        print(f"Warning: Gaze training is only supported for the MPII dataset. Removing gaze modes.")
-        args.training_modes = [mode for mode in args.training_modes if mode != 'gaze']
+
+    # Check for gaze/head_pose training with non-MPII datasets
+    if args.dataset != 'mpii':
+        for mode in ['gaze', 'head_pose']:
+            if mode in args.training_modes:
+                print(f"Warning: {mode.capitalize()} training is only supported for the MPII dataset. Removing {mode} mode.")
+                args.training_modes = [m for m in args.training_modes if m != mode]
         if not args.training_modes:
             args.training_modes = ['landmarks']
     
@@ -537,7 +607,9 @@ def main():
         pretrained_backbone=not args.no_pretrained_backbone,
         in_channels=args.input_channels,
         dropout_rate=args.dropout_rate,
-        num_bins=args.num_angle_bins
+        num_bins=args.num_angle_bins,
+        num_theta_bins=args.num_theta_bins,
+        num_phi_bins=args.num_phi_bins
     ).to(device)
     
     print(f"Model: MHModel initialized with {args.num_landmarks} landmarks and {args.input_channels} input channel(s).")
@@ -548,6 +620,8 @@ def main():
     landmark_criterion = SmoothWingLoss() # Smooth Wing Loss for landmark regression
     yaw_criterion = RCSLoss(num_bins=args.num_angle_bins, bin_width=args.angle_bin_width, alpha=1.0, regression='mae').to(device)
     pitch_criterion = RCSLoss(num_bins=args.num_angle_bins, bin_width=args.angle_bin_width, alpha=1.0, regression='mae').to(device)
+    theta_criterion = RCSLoss(num_bins=args.num_theta_bins, bin_width=args.head_angle_bin_width, alpha=1.0, regression='mae').to(device)
+    phi_criterion = RCSLoss(num_bins=args.num_phi_bins, bin_width=args.head_angle_bin_width, alpha=1.0, regression='mae').to(device)
     
     # Uncertainty-based automatic weighting for multi-task loss
     init_sigmas = []
@@ -555,6 +629,8 @@ def main():
         init_sigmas.append(args.landmark_init_sigma)
     if 'gaze' in args.training_modes:
         init_sigmas.append(args.gaze_init_sigma)
+    if 'head_pose' in args.training_modes:
+        init_sigmas.append(args.head_pose_init_sigma)
     awl = AutomaticWeightedLoss(num_tasks=len(args.training_modes), init_sigmas=init_sigmas).to(device)
 
     # Optimiser now updates both model parameters and σ parameters of AWL
@@ -586,8 +662,10 @@ def main():
         'train_total_loss': [], 'val_total_loss': [],
         'train_landmark_loss': [], 'val_landmark_loss': [],
         'train_gaze_loss': [], 'val_gaze_loss': [],
+        'train_head_pose_loss': [], 'val_head_pose_loss': [],
         'train_landmark_nme': [], 'val_landmark_nme': [],
         'train_ang_error': [], 'val_ang_error': [],
+        'train_head_ang_error': [], 'val_head_ang_error': [],
         'lr': []
     }
     history_filepath = os.path.join(args.checkpoint_dir, 'training_history.json')
@@ -655,8 +733,8 @@ def main():
         
         history['lr'].append(optimizer.param_groups[0]['lr'])  # Record LR for the epoch
 
-        train_total_loss, train_lmk_loss, train_gaze_loss, train_nme, train_ang_err = train_one_epoch(model, train_loader, landmark_criterion, yaw_criterion, pitch_criterion, optimizer, scaler, device, epoch, args, landmark_key, awl)
-        val_total_loss, val_lmk_loss, val_gaze_loss, val_nme, val_ang_err = validate(model, val_loader, landmark_criterion, yaw_criterion, pitch_criterion, device, args, landmark_key, awl)
+        train_total_loss, train_lmk_loss, train_gaze_loss, train_head_pose_loss, train_nme, train_ang_err, train_head_ang_err = train_one_epoch(model, train_loader, landmark_criterion, yaw_criterion, pitch_criterion, theta_criterion, phi_criterion, optimizer, scaler, device, epoch, args, landmark_key, awl)
+        val_total_loss, val_lmk_loss, val_gaze_loss, val_head_pose_loss, val_nme, val_ang_err, val_head_ang_err = validate(model, val_loader, landmark_criterion, yaw_criterion, pitch_criterion, theta_criterion, phi_criterion, device, args, landmark_key, awl)
         
         # Step the scheduler if in main training phase (and scheduler exists)
         if not is_warmup_epoch and scheduler is not None:
@@ -672,10 +750,14 @@ def main():
         history['val_landmark_loss'].append(val_lmk_loss)
         history['train_gaze_loss'].append(train_gaze_loss)
         history['val_gaze_loss'].append(val_gaze_loss)
+        history['train_head_pose_loss'].append(train_head_pose_loss)
+        history['val_head_pose_loss'].append(val_head_pose_loss)
         history['train_landmark_nme'].append(train_nme)
         history['val_landmark_nme'].append(val_nme)
         history['train_ang_error'].append(train_ang_err)
         history['val_ang_error'].append(val_ang_err)
+        history['train_head_ang_error'].append(train_head_ang_err)
+        history['val_head_ang_error'].append(val_head_ang_err)
         
         # Save checkpoint based on frequency or if it's the last epoch
         if (epoch + 1) % args.checkpoint_freq == 0 or (epoch + 1) == args.epochs:

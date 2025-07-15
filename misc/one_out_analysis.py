@@ -80,114 +80,88 @@ def create_visualization(root_dir: str, output_path: str = None):
         print("No valid training histories found")
         return
     
-    # Create figure with subplots (5 rows, 2 columns)
-    fig, axes = plt.subplots(5, 2, figsize=(16, 20))
+    # Create figure with subplots (4 rows, 4 columns)
+    fig, axes = plt.subplots(4, 4, figsize=(24, 16))  # Adjusted for 4 columns
     fig.suptitle(f'Training Analysis - {len(all_histories)} Participants', fontsize=16, fontweight='bold')
-    
+
     # Colors for different runs
     colors = plt.cm.tab10(np.linspace(0, 1, len(all_histories)))
-    
-    # Collect metrics for histograms
-    best_metrics = {
-        'train_landmark_nme': [],
-        'val_landmark_nme': [],
-        'train_ang_error': [],
-        'val_ang_error': []
-    }
-    
-    # Plot 1-6: Loss curves (arranged in pairs)
-    loss_pairs = [
-        (('train_total_loss', 'Train Total Loss'), ('val_total_loss', 'Val Total Loss')),
-        (('train_landmark_loss', 'Train Landmark Loss'), ('val_landmark_loss', 'Val Landmark Loss')),
-        (('train_gaze_loss', 'Train Gaze Loss'), ('val_gaze_loss', 'Val Gaze Loss'))
+
+    # Define the loss and metric keys
+    loss_keys = [
+        ('total_loss', 'Total Loss'),
+        ('landmark_loss', 'Landmark Loss'),
+        ('gaze_loss', 'Gaze Loss'),
+        ('head_pose_loss', 'Head Pose Loss')
     ]
-    
-    for row, ((train_key, train_title), (val_key, val_title)) in enumerate(loss_pairs):
-        # Train loss (left column)
-        ax_train = axes[row, 0]
+    metric_keys = [
+        ('landmark_nme', 'Landmark NME'),
+        ('ang_error', 'Gaze Angular Error'),
+        ('head_ang_error', 'Head Pose Angular Error')
+    ]
+
+    # Plot train losses (column 1)
+    for row, (key_suffix, title) in enumerate(loss_keys):
+        ax = axes[row, 0]
         for j, (file_path, history) in enumerate(all_histories):
-            if train_key in history and history[train_key]:
-                epochs = range(1, len(history[train_key]) + 1)
+            key = f'train_{key_suffix}'
+            if key in history and history[key]:
+                epochs = range(1, len(history[key]) + 1)
                 run_idx = extract_run_index(file_path)
-                ax_train.plot(
-                    epochs,
-                    history[train_key],
-                    color=colors[j],
-                    alpha=0.7,
-                    label=f'P{run_idx}' if row == 0 else "",
-                )
-        
-        ax_train.set_title(train_title, fontweight='bold')
-        ax_train.set_xlabel('Epoch')
-        ax_train.set_ylabel('Loss')
-        ax_train.grid(True, alpha=0.3)
-        
-        if row == 0:  # Add legend only to first subplot
-            ax_train.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        
-        # Val loss (right column)
-        ax_val = axes[row, 1]
+                ax.plot(epochs, history[key], color=colors[j], alpha=0.7, label=f'P{run_idx}' if row == 0 else "")
+        ax.set_title(f'Train {title}', fontweight='bold')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Value')
+        ax.grid(True, alpha=0.3)
+        if row == 0:
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+    # Plot val losses (column 2)
+    for row, (key_suffix, title) in enumerate(loss_keys):
+        ax = axes[row, 1]
         for j, (file_path, history) in enumerate(all_histories):
-            if val_key in history and history[val_key]:
-                epochs = range(1, len(history[val_key]) + 1)
-                ax_val.plot(epochs, history[val_key], color=colors[j], alpha=0.7)
-        
-        ax_val.set_title(val_title, fontweight='bold')
-        ax_val.set_xlabel('Epoch')
-        ax_val.set_ylabel('Loss')
-        ax_val.grid(True, alpha=0.3)
-    
-    # Extract metrics at best validation loss for each run
-    for file_path, history in all_histories:
-        metrics = extract_metrics_at_best_val_loss(history)
-        for key in best_metrics:
-            if key in metrics:
-                best_metrics[key].append(metrics[key])
-    
-    # Plot 7-10: Bar charts
-    bar_configs = [
-        ('train_landmark_nme', 'Train Landmark NME', 3, 0),
-        ('val_landmark_nme', 'Val Landmark NME', 3, 1),
-        ('train_ang_error', 'Train Angular Error', 4, 0),
-        ('val_ang_error', 'Val Angular Error', 4, 1)
-    ]
-    
-    for key, title, row, col in bar_configs:
-        ax = axes[row, col]
-        
-        if best_metrics[key]:
-            data = best_metrics[key]
-            n_runs = len(data)
-            avg_val = np.mean(data)
-            
-            # Create bar chart with run indices + average
-            x_positions = list(range(1, n_runs + 1)) + [n_runs + 1.5]  # Gap before average
-            y_values = data + [avg_val]
-            bar_colors = ['skyblue'] * n_runs + ['red']
-            
-            bars = ax.bar(x_positions, y_values, color=bar_colors, alpha=0.7, edgecolor='black')
-            
-            # Add value labels on bars
-            for i, (x, y) in enumerate(zip(x_positions, y_values)):
-                ax.text(x, y + max(y_values) * 0.01, f'{y:.4f}', 
-                       ha='center', va='bottom', fontsize=9)
-            
-            ax.set_title(title, fontweight='bold')
-            ax.set_xlabel('Participant Index')
+            key = f'val_{key_suffix}'
+            if key in history and history[key]:
+                epochs = range(1, len(history[key]) + 1)
+                ax.plot(epochs, history[key], color=colors[j], alpha=0.7)
+        ax.set_title(f'Val {title}', fontweight='bold')
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Value')
+        ax.grid(True, alpha=0.3)
+
+    # Plot train metrics (column 3)
+    for row, (key_suffix, title) in enumerate(metric_keys):
+        ax = axes[row, 2] if row < 4 else None  # Only 3 metrics, adjust if more
+        if ax:
+            for j, (file_path, history) in enumerate(all_histories):
+                key = f'train_{key_suffix}'
+                if key in history and history[key]:
+                    epochs = range(1, len(history[key]) + 1)
+                    ax.plot(epochs, history[key], color=colors[j], alpha=0.7)
+            ax.set_title(f'Train {title}', fontweight='bold')
+            ax.set_xlabel('Epoch')
             ax.set_ylabel('Value')
-            ax.grid(True, alpha=0.3, axis='y')
-            
-            # Set x-axis labels
-            first_run_idx = extract_run_index(history_files[0]) if history_files else 0
-            x_labels = [f'P{extract_run_index(history_files[i])}' for i in range(n_runs)] + ['Avg']
-            ax.set_xticks(x_positions)
-            ax.set_xticklabels(x_labels, rotation=45, ha='right')
-            
-        else:
-            ax.text(0.5, 0.5, 'No data available', transform=ax.transAxes, 
-                   ha='center', va='center', fontsize=12)
-            ax.set_title(title, fontweight='bold')
-    
+            ax.grid(True, alpha=0.3)
+
+    # Plot val metrics (column 4)
+    for row, (key_suffix, title) in enumerate(metric_keys):
+        ax = axes[row, 3] if row < 4 else None
+        if ax:
+            for j, (file_path, history) in enumerate(all_histories):
+                key = f'val_{key_suffix}'
+                if key in history and history[key]:
+                    epochs = range(1, len(history[key]) + 1)
+                    ax.plot(epochs, history[key], color=colors[j], alpha=0.7)
+            ax.set_title(f'Val {title}', fontweight='bold')
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel('Value')
+            ax.grid(True, alpha=0.3)
+
+    # Hide unused subplots if any
+    for i in range(len(metric_keys), 4):
+        axes[i, 2].set_visible(False)
+        axes[i, 3].set_visible(False)
+
     # Adjust layout
     plt.tight_layout()
     

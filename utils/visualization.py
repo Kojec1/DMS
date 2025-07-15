@@ -1,10 +1,10 @@
 import matplotlib.pyplot as plt
 import os
+import math
 
 
 def plot_training_history(history, save_path):
     """Plots the training/validation history for the multi-head model using subplots, then saves it."""
-    # Determine the number of epochs from one of the history lists
     if not history or not history.get('train_total_loss'):
         print("Warning: History is empty or missing key 'train_total_loss'. Cannot generate plot.")
         return
@@ -12,18 +12,23 @@ def plot_training_history(history, save_path):
     epochs = range(1, len(history['train_total_loss']) + 1)
     
     # Determine metric availability
-    has_new_gaze = 'train_gaze_loss' in history and history['train_gaze_loss']
+    has_gaze = 'train_gaze_loss' in history and history['train_gaze_loss']
+    has_head_pose = 'train_head_pose_loss' in history and history['train_head_pose_loss']
     has_ang_err = 'train_ang_error' in history and history['train_ang_error']
+    has_head_ang_err = 'train_head_ang_error' in history and history['train_head_ang_error']
     
-    # Determine grid size based on available metrics
-    if has_new_gaze:
-        # Format with new gaze metrics - use larger grid
-        fig, axes = plt.subplots(4, 3, figsize=(24, 24))
-        fig.suptitle('Training & Validation Metrics (Gaze)', fontsize=20)
-    else:
-        # Landmarks-only - use smaller grid
-        fig, axes = plt.subplots(3, 2, figsize=(20, 18))
-        fig.suptitle('Training & Validation Metrics', fontsize=20)
+    # Calculate number of plots needed
+    num_plots = 3  # Total Loss, Landmark Loss, Landmark NME
+    if has_gaze:
+        num_plots += 2  # Gaze Loss, Gaze Angular Error
+    if has_head_pose:
+        num_plots += 2  # Head Pose Loss, Head Pose Angular Error
+    num_plots += 1  # Learning Rate
+    
+    # Determine grid size
+    nrows = math.ceil(num_plots / 2)
+    fig, axes = plt.subplots(nrows, 2, figsize=(16, 4 * nrows))
+    fig.suptitle('Training & Validation Metrics', fontsize=20)
     
     axes = axes.flatten()
 
@@ -41,39 +46,40 @@ def plot_training_history(history, save_path):
             ax.legend()
         else:
             ax.set_visible(False)
+            return False
+        return True
 
     plot_idx = 0
     
     # 1. Total Loss (always present)
-    plot_metric(axes[plot_idx], 'train_total_loss', 'val_total_loss', 'Total Loss', 'Loss')
-    plot_idx += 1
+    if plot_metric(axes[plot_idx], 'train_total_loss', 'val_total_loss', 'Total Loss', 'Loss'):
+        plot_idx += 1
 
     # 2. Landmark Loss
-    plot_metric(axes[plot_idx], 'train_landmark_loss', 'val_landmark_loss', 'Landmark Loss', 'Loss')
-    plot_idx += 1
-
-    if has_new_gaze:
-        # 3. Gaze Loss
-        plot_metric(axes[plot_idx], 'train_gaze_loss', 'val_gaze_loss', 'Gaze Loss (RCS)', 'Loss')
+    if plot_metric(axes[plot_idx], 'train_landmark_loss', 'val_landmark_loss', 'Landmark Loss', 'Loss'):
         plot_idx += 1
 
-        # 4. Landmark NME
-        plot_metric(axes[plot_idx], 'train_landmark_nme', 'val_landmark_nme', 'Landmark NME', 'NME')
+    # 3. Gaze Loss (if present)
+    if has_gaze and plot_metric(axes[plot_idx], 'train_gaze_loss', 'val_gaze_loss', 'Gaze Loss (RCS)', 'Loss'):
         plot_idx += 1
 
-        # 5. Angular Error
-        if has_ang_err:
-            plot_metric(axes[plot_idx], 'train_ang_error', 'val_ang_error', 'Gaze Angular Error (°)', 'Error', log_scale=False)
-            plot_idx += 1
-
-    else:
-        # Landmarks-only format
-        
-        # 3. Landmark NME
-        plot_metric(axes[plot_idx], 'train_landmark_nme', 'val_landmark_nme', 'Landmark NME', 'NME')
+    # 4. Head Pose Loss (if present)
+    if has_head_pose and plot_metric(axes[plot_idx], 'train_head_pose_loss', 'val_head_pose_loss', 'Head Pose Loss (RCS)', 'Loss'):
         plot_idx += 1
 
-    # Learning Rate (always last)
+    # 5. Landmark NME
+    if plot_metric(axes[plot_idx], 'train_landmark_nme', 'val_landmark_nme', 'Landmark NME', 'NME'):
+        plot_idx += 1
+
+    # 6. Gaze Angular Error (if present)
+    if has_ang_err and plot_metric(axes[plot_idx], 'train_ang_error', 'val_ang_error', 'Gaze Angular Error (°)', 'Error', log_scale=False):
+        plot_idx += 1
+
+    # 7. Head Pose Angular Error (if present)
+    if has_head_ang_err and plot_metric(axes[plot_idx], 'train_head_ang_error', 'val_head_ang_error', 'Head Pose Angular Error (°)', 'Error', log_scale=False):
+        plot_idx += 1
+
+    # Learning Rate
     if 'lr' in history and history['lr']:
         axes[plot_idx].plot(epochs, history['lr'], 'o-', color='forestgreen', label='Learning Rate')
         axes[plot_idx].set_title('Learning Rate Schedule', fontsize=14)

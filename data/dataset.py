@@ -904,10 +904,11 @@ class MPIIFaceGazeMatDataset(BaseDataset):
 
         # Affine Augmentation
         if self.affine_aug and random.random() > 0.5:
-            img_pil, landmarks_np, gaze_2d_angles_np, _ = random_affine_with_landmarks(
+            img_pil, landmarks_np, gaze_2d_angles_np, head_pose_angles_np = random_affine_with_landmarks(
                 img_pil, 
                 landmarks_np, 
-                gaze_2d_angles_np,
+                gaze_2d_angles_np=gaze_2d_angles_np,
+                head_2d_angles_np=head_pose_angles_np,
                 degrees=(-10, 10),
                 translate_fractions=(0.1, 0.1),
                 scale_range=(0.8, 1.2)
@@ -915,7 +916,9 @@ class MPIIFaceGazeMatDataset(BaseDataset):
 
         # Horizontal flip (Optional)
         if self.horizontal_flip and random.random() > 0.5:
-            img_pil, landmarks_np, gaze_2d_angles_np, _ = horizontal_flip(img_pil, landmarks_np, gaze_2d_angles_np, img_pil.size[0])
+            img_pil, landmarks_np, gaze_2d_angles_np, head_pose_angles_np = horizontal_flip(
+                img_pil, landmarks_np, gaze_2d_angles_np, head_pose_angles_np, effective_width=img_pil.size[0]
+            )
 
         # Normalize landmarks
         landmarks_np = normalize_landmarks(landmarks_np, img_pil.size[0], img_pil.size[1])

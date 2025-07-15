@@ -8,7 +8,9 @@ class MHModel(nn.Module):
                  pretrained_backbone: bool = True,
                  in_channels: int = 1,
                  dropout_rate: float = 0.2,
-                 num_bins: int = 14) -> None:
+                 num_bins: int = 14,
+                 num_theta_bins: int = 14,
+                 num_phi_bins: int = 14) -> None:
         """Multi-Head model for landmarks and gaze estimation."""
         super().__init__()
 
@@ -17,6 +19,8 @@ class MHModel(nn.Module):
         self.pretrained_backbone = pretrained_backbone
         self.in_channels = in_channels
         self.num_bins = num_bins
+        self.num_theta_bins = num_theta_bins
+        self.num_phi_bins = num_phi_bins
 
         num_outputs = num_landmarks * 2  # Each landmark has (x, y)
 
@@ -30,6 +34,8 @@ class MHModel(nn.Module):
         self.landmark_head = nn.Linear(self.backbone.out_features, num_outputs)
         self.yaw_head = nn.Linear(self.backbone.out_features, num_bins)
         self.pitch_head = nn.Linear(self.backbone.out_features, num_bins)
+        self.theta_head = nn.Linear(self.backbone.out_features, num_theta_bins)
+        self.phi_head = nn.Linear(self.backbone.out_features, num_phi_bins)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass."""
@@ -37,11 +43,18 @@ class MHModel(nn.Module):
         features_flattened = torch.flatten(features, 1)
         features_flattened = self.dropout(features_flattened)
 
+        # Facial landmarks head
         landmarks = self.landmark_head(features_flattened)
+
+        # Gaze head
         yaw_logits = self.yaw_head(features_flattened)
         pitch_logits = self.pitch_head(features_flattened)
 
-        return landmarks, yaw_logits, pitch_logits
+        # Head pose head
+        theta_logits = self.theta_head(features_flattened)
+        phi_logits = self.phi_head(features_flattened)
+
+        return landmarks, yaw_logits, pitch_logits, theta_logits, phi_logits
     
     def _replace_first_conv_layer(self) -> None:
         original_first_conv_layer = self.backbone[0][0][0]
