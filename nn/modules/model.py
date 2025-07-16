@@ -49,22 +49,21 @@ class MHModel(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass."""
         features = self.backbone(x)
-        features_flattened = torch.flatten(features, 1)
 
         # Facial landmarks head
-        landmarks = self.landmark_norm(features_flattened)
-        landmarks = self.dropout(landmarks)
-        landmarks = self.landmark_head(features_flattened)
+        landmarks = self.landmark_norm(features)
+        landmarks = self.dropout(torch.flatten(landmarks, 1))
+        landmarks = self.landmark_head(landmarks)
 
         # Gaze head
-        gaze = self.gaze_norm(features_flattened)
-        gaze = self.dropout(gaze)
+        gaze = self.gaze_norm(features)
+        gaze = self.dropout(torch.flatten(gaze, 1))
         yaw_logits = self.yaw_head(gaze)
         pitch_logits = self.pitch_head(gaze)
 
         # Head pose head
-        head_pose = self.head_pose_norm(features_flattened)
-        head_pose = self.dropout(head_pose)
+        head_pose = self.head_pose_norm(features)
+        head_pose = self.dropout(torch.flatten(head_pose, 1))
         theta_logits = self.theta_head(head_pose)
         phi_logits = self.phi_head(head_pose)
 

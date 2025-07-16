@@ -682,7 +682,8 @@ def main():
         'train_landmark_nme': [], 'val_landmark_nme': [],
         'train_ang_error': [], 'val_ang_error': [],
         'train_head_ang_error': [], 'val_head_ang_error': [],
-        'lr': []
+        'lr_backbone': [], 'lr_landmark': [], 
+        'lr_gaze': [], 'lr_head_pose': []
     }
     history_filepath = os.path.join(args.checkpoint_dir, 'training_history.json')
 
