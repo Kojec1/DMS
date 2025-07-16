@@ -83,15 +83,14 @@ def plot_training_history(history, save_path):
     for lr_key, color in zip(['lr_backbone', 'lr_landmark', 'lr_gaze', 'lr_head_pose'], ['forestgreen', 'skyblue', 'coral', 'purple']):
         if lr_key in history and history[lr_key]:
             axes[plot_idx].plot(epochs, history[lr_key], 'o-', color=color, label=f'{lr_key.split("_")[-1].capitalize()}')
-        axes[plot_idx].set_title('Learning Rate Schedule', fontsize=14)
-        axes[plot_idx].set_xlabel('Epochs', fontsize=10)
-        axes[plot_idx].set_ylabel('Learning Rate', fontsize=10)
-        axes[plot_idx].set_yscale('log')
-        axes[plot_idx].grid(True, which='both', linestyle='--', linewidth=0.5)
-        axes[plot_idx].legend()
+    axes[plot_idx].set_title('Learning Rate Schedule', fontsize=14)
+    axes[plot_idx].set_xlabel('Epochs', fontsize=10)
+    axes[plot_idx].set_ylabel('Learning Rate', fontsize=10)
+    axes[plot_idx].set_yscale('log')
+    axes[plot_idx].grid(True, which='both', linestyle='--', linewidth=0.5)
+    axes[plot_idx].legend()
 
-        plot_idx += 1
-
+    plot_idx += 1
 
     # Hide any remaining unused subplots
     for i in range(plot_idx, len(axes)):
