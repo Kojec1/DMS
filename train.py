@@ -5,8 +5,8 @@ from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
 import os
 import argparse
-import time
 from tqdm import tqdm
+import json
 
 from nn.modules.model import MHModel
 from nn.loss import SmoothWingLoss, RCSLoss, AutomaticWeightedLoss
@@ -360,6 +360,11 @@ def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criteri
 # Main Function
 def main():
     args = get_args()
+
+    # Dump args to a json file
+    args_dict = vars(args)
+    with open(os.path.join(args.checkpoint_dir, 'training_args.json'), 'w') as f:
+        json.dump(args_dict, f, indent=4)
     
     if args.dataset == 'wflw':
         if not args.annotation_file and not (args.train_annotation_file and args.val_annotation_file):
@@ -614,7 +619,7 @@ def main():
     
     print(f"Model: MHModel initialized with {args.num_landmarks} landmarks and {args.input_channels} input channel(s).")
     print(f"Backbone pretrained: {not args.no_pretrained_backbone}")
-    print(f"Training Modes: {', '.join(args.training_modes).upper()} (Landmark Weight: {args.landmark_loss_weight}, Gaze Weight: {args.gaze_loss_weight})")
+    print(f"Training Modes: {', '.join(args.training_modes).upper()} (Landmark Weight: {args.landmark_loss_weight}, Gaze Weight: {args.gaze_loss_weight}, Head Pose Weight: {args.head_pose_loss_weight})")
 
     # Loss and Optimizer
     landmark_criterion = SmoothWingLoss() # Smooth Wing Loss for landmark regression
