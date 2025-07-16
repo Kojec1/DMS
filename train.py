@@ -30,8 +30,11 @@ def get_args():
     parser.add_argument('--input_channels', type=int, default=1, choices=[1, 3], help='Number of input image channels (1 for grayscale, 3 for RGB)')
     parser.add_argument('--batch_size', type=int, default=32, help='Training batch size')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
-    parser.add_argument('--lr_final', type=float, default=1e-6, help='Final learning rate for linear scheduler')
+    parser.add_argument('--backbone_lr', type=float, default=1e-4, help='Initial learning rate for backbone')
+    parser.add_argument('--landmark_lr', type=float, default=1e-5, help='Initial learning rate for landmark task')
+    parser.add_argument('--gaze_lr', type=float, default=1e-4, help='Initial learning rate for gaze task')
+    parser.add_argument('--head_pose_lr', type=float, default=5e-4, help='Initial learning rate for head pose task')
+    parser.add_argument('--lr_final_factor', type=float, default=0.01, help='Factor for final learning rate (final_lr = initial_lr * factor)')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay for optimizer')
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints_mh', help='Directory to save checkpoints')
     parser.add_argument('--checkpoint_freq', type=int, default=10, help='Frequency (in epochs) to save checkpoints. Best model is always saved.')
@@ -638,8 +641,16 @@ def main():
         init_sigmas.append(args.head_pose_init_sigma)
     awl = AutomaticWeightedLoss(num_tasks=len(args.training_modes), init_sigmas=init_sigmas).to(device)
 
-    # Optimiser now updates both model parameters and σ parameters of AWL
-    optimizer = optim.AdamW(list(model.parameters()) + list(awl.parameters()), lr=args.lr, weight_decay=args.weight_decay)
+    # Parameter groups for task-specific learning rates
+    param_groups = [
+        {'params': model.backbone.parameters(), 'lr': args.backbone_lr},
+        {'params': model.landmark_head.parameters(), 'lr': args.landmark_lr},
+        {'params': list(model.yaw_head.parameters()) + list(model.pitch_head.parameters()), 'lr': args.gaze_lr},
+        {'params': list(model.theta_head.parameters()) + list(model.phi_head.parameters()), 'lr': args.head_pose_lr},
+        {'params': awl.parameters(), 'lr': args.backbone_lr},
+    ]
+    optimizer = optim.AdamW(param_groups, weight_decay=args.weight_decay)
+    initial_lrs = [g['lr'] for g in optimizer.param_groups]
     
     # Learning Rate Scheduler, will be initialized considering warmup
     scheduler = None # Initialize later
@@ -648,11 +659,11 @@ def main():
     if main_training_epochs > 0:
         scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer, 
-            start_factor=1.0, # Scheduler starts from the LR set in optimizer (will be args.lr at main phase start)
-            end_factor=args.lr_final / args.lr if args.lr > 0 else 0.0, # Handle args.lr = 0
+            start_factor=1.0, 
+            end_factor=args.lr_final_factor, 
             total_iters=main_training_epochs
         )
-        print(f"Main LR scheduler configured for {main_training_epochs} epochs, from {args.lr} to {args.lr_final}")
+        print(f"Main LR scheduler configured for {main_training_epochs} epochs, with final factor {args.lr_final_factor}")
     else:
         print("No main training epochs after warmup, or main_training_epochs is zero. Scheduler not configured.")
     
@@ -680,7 +691,7 @@ def main():
             # Pass scheduler to load_checkpoint
             print(f"Resuming training from checkpoint: {args.resume_checkpoint}")
             start_epoch = load_checkpoint(args.resume_checkpoint, model, optimizer, scheduler, scaler if args.amp else None)
-            print(f"Resumed from epoch {start_epoch}. Optimizer LR: {optimizer.param_groups[0]['lr']:.2e}")
+            print(f"Resumed from epoch {start_epoch}. Optimizer LRs: {[g['lr'] for g in optimizer.param_groups]}")
             
             # Load history if resuming
             loaded_history = load_history(history_filepath)
@@ -706,22 +717,16 @@ def main():
         if args.freeze_backbone_warmup and hasattr(model, 'backbone') and isinstance(model.backbone, nn.Module):
             if is_warmup_epoch:
                 # Freeze backbone if it's the first warmup epoch or if it was previously unfrozen
-                if not all(not p.requires_grad for p in model.backbone.parameters()):
+                if any(p.requires_grad for p in model.backbone.parameters()):
                     print(f"Epoch {epoch+1}: Freezing backbone for warmup phase (epoch < {args.warmup_epochs}).")
                     for param in model.backbone.parameters():
                         param.requires_grad = False
             else: # Main training phase, i.e., epoch >= args.warmup_epochs
                 # Unfreeze backbone if it was frozen
-                if any(not p.requires_grad for p in model.backbone.parameters()):
+                if not all(p.requires_grad for p in model.backbone.parameters()):
                     print(f"Epoch {epoch+1}: Unfreezing backbone for main training phase (epoch >= {args.warmup_epochs}).")
                     for param in model.backbone.parameters():
                         param.requires_grad = True
-        elif not args.freeze_backbone_warmup and hasattr(model, 'backbone') and isinstance(model.backbone, nn.Module):
-            # Ensure backbone is trainable if freeze_backbone_warmup is false
-            if any(not p.requires_grad for p in model.backbone.parameters()):
-                print(f"Epoch {epoch+1}: Ensuring backbone is trainable (freeze_backbone_warmup=False).")
-                for param in model.backbone.parameters():
-                    param.requires_grad = True
         
         # Set Learning Rate for the current epoch
         if is_warmup_epoch:
@@ -731,12 +736,15 @@ def main():
                 print(f"Warmup Epoch {epoch+1}/{args.warmup_epochs}. LR explicitly set to: {args.warmup_lr:.2e}")
         else: # Main training phase
             if epoch == args.warmup_epochs: # First main training epoch
-                # Set optimizer's LR to args.lr so scheduler starts from the correct base
-                for g in optimizer.param_groups:
-                    g['lr'] = args.lr
-                print(f"Main Training (Epoch {epoch+1-args.warmup_epochs}/{main_training_epochs}). LR reset to: {args.lr:.2e} for scheduler.")
-        
-        history['lr'].append(optimizer.param_groups[0]['lr'])  # Record LR for the epoch
+                # Reset to initial LRs
+                for i, g in enumerate(optimizer.param_groups):
+                    g['lr'] = initial_lrs[i]
+                print(f"Main Training (Epoch {epoch+1-args.warmup_epochs}/{main_training_epochs}). LRs reset to initials: {initial_lrs}")
+
+        history['lr_backbone'].append(optimizer.param_groups[0]['lr'])  # Record backbone LR for the epoch
+        history['lr_landmark'].append(optimizer.param_groups[1]['lr'])  # Record landmark LR for the epoch
+        history['lr_gaze'].append(optimizer.param_groups[2]['lr'])  # Record gaze LR for the epoch
+        history['lr_head_pose'].append(optimizer.param_groups[3]['lr'])  # Record head pose LR for the epoch
 
         train_total_loss, train_lmk_loss, train_gaze_loss, train_head_pose_loss, train_nme, train_ang_err, train_head_ang_err = train_one_epoch(model, train_loader, landmark_criterion, yaw_criterion, pitch_criterion, theta_criterion, phi_criterion, optimizer, scaler, device, epoch, args, landmark_key, awl)
         val_total_loss, val_lmk_loss, val_gaze_loss, val_head_pose_loss, val_nme, val_ang_err, val_head_ang_err = validate(model, val_loader, landmark_criterion, yaw_criterion, pitch_criterion, theta_criterion, phi_criterion, device, args, landmark_key, awl)
@@ -745,9 +753,9 @@ def main():
         if not is_warmup_epoch and scheduler is not None:
             scheduler.step()
             # Log the LR after scheduler step for clarity
-            print(f"Main Training (Epoch {epoch + 1 - args.warmup_epochs}/{main_training_epochs}). Scheduler stepped. Current LR: {optimizer.param_groups[0]['lr']:.2e}")
+            print(f"Main Training (Epoch {epoch + 1 - args.warmup_epochs}/{main_training_epochs}). Scheduler stepped. Current LRs: {history['lr_backbone'][-1]:.2e}, {history['lr_landmark'][-1]:.2e}, {history['lr_gaze'][-1]:.2e}, {history['lr_head_pose'][-1]:.2e}")
         elif not is_warmup_epoch: # Main training but no scheduler (e.g. main_training_epochs <=0)
-             print(f"Main Training (Epoch {epoch + 1 - args.warmup_epochs}/{main_training_epochs}). No scheduler. LR: {optimizer.param_groups[0]['lr']:.2e}")
+            print(f"Main Training (Epoch {epoch + 1 - args.warmup_epochs}/{main_training_epochs}). No scheduler. LRs: {history['lr_backbone'][-1]:.2e}, {history['lr_landmark'][-1]:.2e}, {history['lr_gaze'][-1]:.2e}, {history['lr_head_pose'][-1]:.2e}")
 
         history['train_total_loss'].append(train_total_loss)
         history['val_total_loss'].append(val_total_loss)

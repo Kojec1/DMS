@@ -79,15 +79,19 @@ def plot_training_history(history, save_path):
     if has_head_ang_err and plot_metric(axes[plot_idx], 'train_head_ang_error', 'val_head_ang_error', 'Head Pose Angular Error (°)', 'Error', log_scale=False):
         plot_idx += 1
 
-    # Learning Rate
-    if 'lr' in history and history['lr']:
-        axes[plot_idx].plot(epochs, history['lr'], 'o-', color='forestgreen', label='Learning Rate')
+    # Learning Rates
+    for lr_key, color in zip(['lr_backbone', 'lr_landmark', 'lr_gaze', 'lr_head_pose'], ['forestgreen', 'skyblue', 'coral', 'purple']):
+        if lr_key in history and history[lr_key]:
+            axes[plot_idx].plot(epochs, history[lr_key], 'o-', color=color, label=f'{lr_key.split("_")[-1].capitalize()}')
         axes[plot_idx].set_title('Learning Rate Schedule', fontsize=14)
         axes[plot_idx].set_xlabel('Epochs', fontsize=10)
         axes[plot_idx].set_ylabel('Learning Rate', fontsize=10)
+        axes[plot_idx].set_yscale('log')
         axes[plot_idx].grid(True, which='both', linestyle='--', linewidth=0.5)
         axes[plot_idx].legend()
+
         plot_idx += 1
+
 
     # Hide any remaining unused subplots
     for i in range(plot_idx, len(axes)):

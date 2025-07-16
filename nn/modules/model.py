@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
+from torchvision.models.convnext import LayerNorm2d
 from nn.modules.bottleneck.convnext import convnext_tiny
+from functools import partial
+
 
 class MHModel(nn.Module):
     def __init__(self,
@@ -23,10 +26,16 @@ class MHModel(nn.Module):
         self.num_phi_bins = num_phi_bins
 
         num_outputs = num_landmarks * 2  # Each landmark has (x, y)
+        norm_layer = partial(LayerNorm2d, eps=1e-6)
 
         # Replace first conv for grayscale (if necessary)
         if self.in_channels == 1:
             self._replace_first_conv_layer()
+
+        # Normalization layers
+        self.landmark_norm = norm_layer(self.backbone.out_features)
+        self.gaze_norm = norm_layer(self.backbone.out_features)
+        self.head_pose_norm = norm_layer(self.backbone.out_features)
 
         self.dropout = nn.Dropout(dropout_rate)
 
@@ -41,18 +50,23 @@ class MHModel(nn.Module):
         """Forward pass."""
         features = self.backbone(x)
         features_flattened = torch.flatten(features, 1)
-        features_flattened = self.dropout(features_flattened)
 
         # Facial landmarks head
+        landmarks = self.landmark_norm(features_flattened)
+        landmarks = self.dropout(landmarks)
         landmarks = self.landmark_head(features_flattened)
 
         # Gaze head
-        yaw_logits = self.yaw_head(features_flattened)
-        pitch_logits = self.pitch_head(features_flattened)
+        gaze = self.gaze_norm(features_flattened)
+        gaze = self.dropout(gaze)
+        yaw_logits = self.yaw_head(gaze)
+        pitch_logits = self.pitch_head(gaze)
 
         # Head pose head
-        theta_logits = self.theta_head(features_flattened)
-        phi_logits = self.phi_head(features_flattened)
+        head_pose = self.head_pose_norm(features_flattened)
+        head_pose = self.dropout(head_pose)
+        theta_logits = self.theta_head(head_pose)
+        phi_logits = self.phi_head(head_pose)
 
         return landmarks, yaw_logits, pitch_logits, theta_logits, phi_logits
     
