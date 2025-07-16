@@ -52,7 +52,7 @@ def extract_metrics_at_best_val_loss(history: Dict[str, Any]) -> Dict[str, float
     best_idx = np.argmin(val_losses)
     
     metrics = {}
-    for key in ['train_landmark_nme', 'val_landmark_nme', 'train_ang_error', 'val_ang_error']:
+    for key in ['train_landmark_nme', 'val_landmark_nme', 'train_ang_error', 'val_ang_error', 'train_head_ang_error', 'val_head_ang_error']:
         if key in history and len(history[key]) > best_idx:
             metrics[key] = history[key][best_idx]
     
@@ -86,6 +86,16 @@ def create_visualization(root_dir: str, output_path: str = None):
 
     # Colors for different runs
     colors = plt.cm.tab10(np.linspace(0, 1, len(all_histories)))
+
+    # Collect metrics for histograms
+    best_metrics = {
+        'train_landmark_nme': [],
+        'val_landmark_nme': [],
+        'train_ang_error': [],
+        'val_ang_error': [],
+        'train_head_ang_error': [],
+        'val_head_ang_error': []
+    }
 
     # Define the loss and metric keys
     loss_keys = [
@@ -129,33 +139,86 @@ def create_visualization(root_dir: str, output_path: str = None):
         ax.set_ylabel('Value')
         ax.grid(True, alpha=0.3)
 
+    # Extract metrics at best validation loss for each run
+    for file_path, history in all_histories:
+        metrics = extract_metrics_at_best_val_loss(history)
+        for key in best_metrics:
+            if key in metrics:
+                best_metrics[key].append(metrics[key])
+
     # Plot train metrics (column 3)
     for row, (key_suffix, title) in enumerate(metric_keys):
         ax = axes[row, 2] if row < 4 else None  # Only 3 metrics, adjust if more
         if ax:
-            for j, (file_path, history) in enumerate(all_histories):
-                key = f'train_{key_suffix}'
-                if key in history and history[key]:
-                    epochs = range(1, len(history[key]) + 1)
-                    ax.plot(epochs, history[key], color=colors[j], alpha=0.7)
-            ax.set_title(f'Train {title}', fontweight='bold')
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel('Value')
-            ax.grid(True, alpha=0.3)
+            key = f'train_{key_suffix}'
+
+            if best_metrics[key]:
+                data = best_metrics[key]
+                n_runs = len(data)
+                avg_val = np.mean(data)
+
+                # Create bar chart with run indices + average
+                x_positions = list(range(1, n_runs + 1)) + [n_runs + 1.5]  # Gap before average
+                y_values = data + [avg_val]
+                bar_colors = ['skyblue'] * n_runs + ['red']
+
+                bars = ax.bar(x_positions, y_values, color=bar_colors, alpha=0.7, edgecolor='black')
+
+                # Add value labels on bars
+                for i, (x, y) in enumerate(zip(x_positions, y_values)):
+                    ax.text(x, y + max(y_values) * 0.01, f'{y:.4f}', ha='center', va='bottom', fontsize=9)
+
+                ax.set_title(f'Train {title}', fontweight='bold')
+                ax.set_xlabel('Participant Index')
+                ax.set_ylabel('Value')
+                ax.grid(True, alpha=0.3, axis='y')
+
+                # Set x-axis labels
+                first_run_idx = extract_run_index(history_files[0]) if history_files else 0
+                x_labels = [f'P{extract_run_index(history_files[i])}' for i in range(n_runs)] + ['Avg']
+                ax.set_xticks(x_positions)
+                ax.set_xticklabels(x_labels, rotation=45, ha='right')
+
+            else:
+                ax.test(0.5, 0.5, 'No data', transform=ax.transAxes, ha='center', va='center', fontsize=12)
+                ax.set_title(f'Train {title}', fontweight='bold')
 
     # Plot val metrics (column 4)
     for row, (key_suffix, title) in enumerate(metric_keys):
         ax = axes[row, 3] if row < 4 else None
         if ax:
-            for j, (file_path, history) in enumerate(all_histories):
-                key = f'val_{key_suffix}'
-                if key in history and history[key]:
-                    epochs = range(1, len(history[key]) + 1)
-                    ax.plot(epochs, history[key], color=colors[j], alpha=0.7)
-            ax.set_title(f'Val {title}', fontweight='bold')
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel('Value')
-            ax.grid(True, alpha=0.3)
+            key = f'val_{key_suffix}'
+
+            if best_metrics[key]:
+                data = best_metrics[key]
+                n_runs = len(data)
+                avg_val = np.mean(data)
+
+                # Create bar chart with run indices + average
+                x_positions = list(range(1, n_runs + 1)) + [n_runs + 1.5]  # Gap before average
+                y_values = data + [avg_val]
+                bar_colors = ['skyblue'] * n_runs + ['red']
+
+                bars = ax.bar(x_positions, y_values, color=bar_colors, alpha=0.7, edgecolor='black')
+
+                # Add value labels on bars
+                for i, (x, y) in enumerate(zip(x_positions, y_values)):
+                    ax.text(x, y + max(y_values) * 0.01, f'{y:.4f}', ha='center', va='bottom', fontsize=9)
+
+                ax.set_title(f'Val {title}', fontweight='bold')
+                ax.set_xlabel('Participant Index')
+                ax.set_ylabel('Value')
+                ax.grid(True, alpha=0.3, axis='y')
+
+                # Set x-axis labels
+                first_run_idx = extract_run_index(history_files[0]) if history_files else 0
+                x_labels = [f'P{extract_run_index(history_files[i])}' for i in range(n_runs)] + ['Avg']
+                ax.set_xticks(x_positions)
+                ax.set_xticklabels(x_labels, rotation=45, ha='right')
+
+            else:
+                ax.test(0.5, 0.5, 'No data', transform=ax.transAxes, ha='center', va='center', fontsize=12)
+                ax.set_title(f'Val {title}', fontweight='bold')
 
     # Hide unused subplots if any
     for i in range(len(metric_keys), 4):
