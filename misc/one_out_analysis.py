@@ -180,7 +180,7 @@ def create_visualization(root_dir: str, output_path: str = None):
                 ax.set_xticklabels(x_labels, rotation=45, ha='right')
 
             else:
-                ax.test(0.5, 0.5, 'No data', transform=ax.transAxes, ha='center', va='center', fontsize=12)
+                ax.text(0.5, 0.5, 'No data', transform=ax.transAxes, ha='center', va='center', fontsize=12)
                 ax.set_title(f'Train {title}', fontweight='bold')
 
     # Plot val metrics (column 4)
@@ -217,7 +217,7 @@ def create_visualization(root_dir: str, output_path: str = None):
                 ax.set_xticklabels(x_labels, rotation=45, ha='right')
 
             else:
-                ax.test(0.5, 0.5, 'No data', transform=ax.transAxes, ha='center', va='center', fontsize=12)
+                ax.text(0.5, 0.5, 'No data', transform=ax.transAxes, ha='center', va='center', fontsize=12)
                 ax.set_title(f'Val {title}', fontweight='bold')
 
     # Hide unused subplots if any
