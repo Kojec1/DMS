@@ -364,6 +364,7 @@ def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criteri
 # Main Function
 def main():
     args = get_args()
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     # Dump args to a json file
     args_dict = vars(args)
@@ -406,8 +407,6 @@ def main():
 
     setup_device(device)
     
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
-
     # Image Transforms
     if args.input_channels == 1:
         normalize = transforms.Normalize(mean=[0.449], std=[0.226]) # Grayscale normalization (adjust as needed)
