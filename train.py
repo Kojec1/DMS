@@ -141,48 +141,45 @@ def train_one_epoch(model, dataloader, landmark_criterion, yaw_criterion, pitch_
 
     for batch_idx, batch_data in tqdm(enumerate(dataloader), total=len(dataloader), desc="Training"):
         images = batch_data['image'].to(device, non_blocking=True)
-        gt_landmarks = batch_data[landmark_key].to(device, non_blocking=True)
-        gt_landmarks_flat = gt_landmarks.view(images.size(0), -1)
-
-        # Ground-truth gaze and head pose angles in degrees
-        gt_pitch_deg = torch.rad2deg(batch_data['gaze_2d_angles'][:, 0]).to(device)
-        gt_yaw_deg   = torch.rad2deg(batch_data['gaze_2d_angles'][:, 1]).to(device)
-
-
-        gt_theta_deg = torch.rad2deg(batch_data['head_pose_angles'][:, 0]).to(device)
-        gt_phi_deg   = torch.rad2deg(batch_data['head_pose_angles'][:, 1]).to(device)
 
         optimizer.zero_grad(set_to_none=True)
-
         with torch.amp.autocast(device_type='cuda', enabled=args.amp):
             pred_landmarks, yaw_logits, pitch_logits, theta_logits, phi_logits = model(images)
+
+            # Loss balancing
+            losses_for_awl = []
 
             # Landmark loss (SmoothWingLoss)
             landmark_loss = torch.tensor(0.0, device=device)
             if 'landmarks' in args.training_modes:
+                gt_landmarks = batch_data[landmark_key].to(device, non_blocking=True)
+                gt_landmarks_flat = gt_landmarks.view(images.size(0), -1)
+
                 landmark_loss = landmark_criterion(pred_landmarks, gt_landmarks_flat)
+                losses_for_awl.append(landmark_loss)
 
             # Gaze loss (yaw + pitch RCS)
             gaze_loss = torch.tensor(0.0, device=device)
             if 'gaze' in args.training_modes:
+                gt_pitch_deg = torch.rad2deg(batch_data['gaze_2d_angles'][:, 0]).to(device)
+                gt_yaw_deg = torch.rad2deg(batch_data['gaze_2d_angles'][:, 1]).to(device)
+
                 yaw_loss = yaw_criterion(yaw_logits, gt_yaw_deg)
                 pitch_loss = pitch_criterion(pitch_logits, gt_pitch_deg)
+
                 gaze_loss = (yaw_loss + pitch_loss) * 0.5
+                losses_for_awl.append(gaze_loss)
 
             # Head pose loss (theta + phi RCS)
             head_pose_loss = torch.tensor(0.0, device=device)
             if 'head_pose' in args.training_modes:
+                gt_theta_deg = torch.rad2deg(batch_data['head_pose_angles'][:, 0]).to(device)
+                gt_phi_deg = torch.rad2deg(batch_data['head_pose_angles'][:, 1]).to(device)
+
                 theta_loss = theta_criterion(theta_logits, gt_theta_deg)
                 phi_loss = phi_criterion(phi_logits, gt_phi_deg)
+                
                 head_pose_loss = (theta_loss + phi_loss) * 0.5
-
-            # Loss balancing
-            losses_for_awl = []
-            if 'landmarks' in args.training_modes:
-                losses_for_awl.append(landmark_loss)
-            if 'gaze' in args.training_modes:
-                losses_for_awl.append(gaze_loss)
-            if 'head_pose' in args.training_modes:
                 losses_for_awl.append(head_pose_loss)
 
             total_loss = awl(*losses_for_awl)
@@ -279,45 +276,42 @@ def validate(model, dataloader, landmark_criterion, yaw_criterion, pitch_criteri
     with torch.no_grad():
         for batch_data in tqdm(dataloader, total=len(dataloader), desc="Validating"):
             images = batch_data['image'].to(device, non_blocking=True)
-            gt_landmarks = batch_data[landmark_key].to(device, non_blocking=True)
-            gt_landmarks_flat = gt_landmarks.view(images.size(0), -1)
-
-            gt_pitch_deg = torch.rad2deg(batch_data['gaze_2d_angles'][:, 0]).to(device)
-            gt_yaw_deg   = torch.rad2deg(batch_data['gaze_2d_angles'][:, 1]).to(device)
-
-            # Ground-truth head pose angles (radians) → degrees
-            gt_theta_deg = torch.rad2deg(batch_data['head_pose_angles'][:, 0]).to(device)
-            gt_phi_deg   = torch.rad2deg(batch_data['head_pose_angles'][:, 1]).to(device)
 
             with torch.amp.autocast(device_type='cuda', enabled=args.amp):
                 pred_landmarks, yaw_logits, pitch_logits, theta_logits, phi_logits = model(images)
 
+                # Loss balancing
+                losses_for_awl = []
+
                 # Landmark loss (SmoothWingLoss)
                 landmark_loss = torch.tensor(0.0, device=device)
                 if 'landmarks' in args.training_modes:
+                    gt_landmarks = batch_data[landmark_key].to(device, non_blocking=True)
+                    gt_landmarks_flat = gt_landmarks.view(images.size(0), -1)
+
                     landmark_loss = landmark_criterion(pred_landmarks, gt_landmarks_flat)
+                    losses_for_awl.append(landmark_loss)
 
                 # Gaze loss (yaw + pitch RCS)
                 gaze_loss = torch.tensor(0.0, device=device)
                 if 'gaze' in args.training_modes:
+                    gt_pitch_deg = torch.rad2deg(batch_data['gaze_2d_angles'][:, 0]).to(device)
+                    gt_yaw_deg = torch.rad2deg(batch_data['gaze_2d_angles'][:, 1]).to(device)
+
                     yaw_loss = yaw_criterion(yaw_logits, gt_yaw_deg)
                     pitch_loss = pitch_criterion(pitch_logits, gt_pitch_deg)
                     gaze_loss = (yaw_loss + pitch_loss) * 0.5
+                    losses_for_awl.append(gaze_loss)
 
                 # Head pose loss (theta + phi RCS)
                 head_pose_loss = torch.tensor(0.0, device=device)
                 if 'head_pose' in args.training_modes:
+                    gt_theta_deg = torch.rad2deg(batch_data['head_pose_angles'][:, 0]).to(device)
+                    gt_phi_deg  = torch.rad2deg(batch_data['head_pose_angles'][:, 1]).to(device)
+
                     theta_loss = theta_criterion(theta_logits, gt_theta_deg)
                     phi_loss = phi_criterion(phi_logits, gt_phi_deg)
                     head_pose_loss = (theta_loss + phi_loss) * 0.5
-
-                # Loss balancing
-                losses_for_awl = []
-                if 'landmarks' in args.training_modes:
-                    losses_for_awl.append(landmark_loss)
-                if 'gaze' in args.training_modes:
-                    losses_for_awl.append(gaze_loss)
-                if 'head_pose' in args.training_modes:
                     losses_for_awl.append(head_pose_loss)
 
                 total_loss = awl(*losses_for_awl)
