@@ -12,10 +12,18 @@ def plot_training_history(history, save_path):
     epochs = range(1, len(history['train_total_loss']) + 1)
     
     # Determine metric availability
+    has_landmark = 'train_landmark_loss' in history and history['train_landmark_loss']
     has_gaze = 'train_gaze_loss' in history and history['train_gaze_loss']
     has_head_pose = 'train_head_pose_loss' in history and history['train_head_pose_loss']
-    has_ang_err = 'train_ang_error' in history and history['train_ang_error']
-    has_head_ang_err = 'train_head_ang_error' in history and history['train_head_ang_error']
+    has_awl = 'awl_weights' in history and history['awl_weights']
+
+    task_list = []
+    if has_landmark:
+        task_list.append('landmark')
+    if has_gaze:
+        task_list.append('gaze')
+    if has_head_pose:
+        task_list.append('head_pose')
     
     # Calculate number of plots needed
     num_plots = 3  # Total Loss, Landmark Loss, Landmark NME
@@ -23,6 +31,8 @@ def plot_training_history(history, save_path):
         num_plots += 2  # Gaze Loss, Gaze Angular Error
     if has_head_pose:
         num_plots += 2  # Head Pose Loss, Head Pose Angular Error
+    if has_awl:
+        num_plots += 1  # AWL weights
     num_plots += 1  # Learning Rate
     
     # Determine grid size
@@ -56,7 +66,7 @@ def plot_training_history(history, save_path):
         plot_idx += 1
 
     # 2. Landmark Loss
-    if plot_metric(axes[plot_idx], 'train_landmark_loss', 'val_landmark_loss', 'Landmark Loss', 'Loss'):
+    if has_landmark and plot_metric(axes[plot_idx], 'train_landmark_loss', 'val_landmark_loss', 'Landmark Loss', 'Loss'):
         plot_idx += 1
 
     # 3. Gaze Loss (if present)
@@ -68,15 +78,28 @@ def plot_training_history(history, save_path):
         plot_idx += 1
 
     # 5. Landmark NME
-    if plot_metric(axes[plot_idx], 'train_landmark_nme', 'val_landmark_nme', 'Landmark NME', 'NME'):
+    if has_landmark and plot_metric(axes[plot_idx], 'train_landmark_nme', 'val_landmark_nme', 'Landmark NME', 'NME'):
         plot_idx += 1
 
     # 6. Gaze Angular Error (if present)
-    if has_ang_err and plot_metric(axes[plot_idx], 'train_ang_error', 'val_ang_error', 'Gaze Angular Error (°)', 'Error', log_scale=False):
+    if has_gaze and plot_metric(axes[plot_idx], 'train_ang_error', 'val_ang_error', 'Gaze Angular Error (°)', 'Error', log_scale=False):
         plot_idx += 1
 
     # 7. Head Pose Angular Error (if present)
-    if has_head_ang_err and plot_metric(axes[plot_idx], 'train_head_ang_error', 'val_head_ang_error', 'Head Pose Angular Error (°)', 'Error', log_scale=False):
+    if has_head_pose and plot_metric(axes[plot_idx], 'train_head_ang_error', 'val_head_ang_error', 'Head Pose Angular Error (°)', 'Error', log_scale=False):
+        plot_idx += 1
+
+    # 8. AWL weights (if present)
+    if has_awl:
+        n_tasks = len(history['awl_weights'][0])
+        for i in range(n_tasks):
+            axes[plot_idx].plot(epochs, [weights[i] for weights in history['awl_weights']], 'o-', color='purple', label=f'{task_list[i].capitalize()}')
+        axes[plot_idx].set_title('AWL Weights', fontsize=14)
+        axes[plot_idx].set_xlabel('Epochs', fontsize=10)
+        axes[plot_idx].set_ylabel('Weights', fontsize=10)
+        axes[plot_idx].grid(True, which='both', linestyle='--', linewidth=0.5)
+        axes[plot_idx].legend()
+
         plot_idx += 1
 
     # Learning Rates

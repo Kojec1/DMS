@@ -48,6 +48,7 @@ def get_args():
     
     parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision')
     parser.add_argument('--resume_checkpoint', type=str, default=None, help='Path to checkpoint to resume training from')
+    parser.add_argument('--load_weights_only', action='store_true', help='Load model weights only (training starts from epoch 0)')
 
     # Model arguments
     parser.add_argument('--no_pretrained_backbone', action='store_true', help='Do not use pretrained backbone weights')
@@ -683,7 +684,8 @@ def main():
         'train_ang_error': [], 'val_ang_error': [],
         'train_head_ang_error': [], 'val_head_ang_error': [],
         'lr_backbone': [], 'lr_landmark': [], 
-        'lr_gaze': [], 'lr_head_pose': []
+        'lr_gaze': [], 'lr_head_pose': [],
+        'awl_weights': []
     }
     history_filepath = os.path.join(args.checkpoint_dir, 'training_history.json')
 
@@ -691,16 +693,19 @@ def main():
         if os.path.isfile(args.resume_checkpoint):
             # Pass scheduler to load_checkpoint
             print(f"Resuming training from checkpoint: {args.resume_checkpoint}")
-            start_epoch = load_checkpoint(args.resume_checkpoint, model, optimizer, scheduler, scaler if args.amp else None)
-            print(f"Resumed from epoch {start_epoch}. Optimizer LRs: {[g['lr'] for g in optimizer.param_groups]}")
-            
-            # Load history if resuming
-            loaded_history = load_history(history_filepath)
-            if loaded_history:
-                history = loaded_history
-                print("Resumed training history.")
+            if args.load_weights_only:
+                load_checkpoint(args.resume_checkpoint, model, None, None, None)
             else:
-                print("No existing history file found or error loading it. Starting with fresh history.")
+                start_epoch = load_checkpoint(args.resume_checkpoint, model, optimizer, scheduler, scaler if args.amp else None)
+                print(f"Resumed from epoch {start_epoch}. Optimizer LRs: {[g['lr'] for g in optimizer.param_groups]}")
+            
+                # Load history if resuming
+                loaded_history = load_history(history_filepath)
+                if loaded_history:
+                    history = loaded_history
+                    print("Resumed training history.")
+                else:
+                    print("No existing history file found or error loading it. Starting with fresh history.")
         else:
             print(f"Warning: Resume checkpoint not found at {args.resume_checkpoint}")
 
@@ -746,6 +751,14 @@ def main():
         history['lr_landmark'].append(optimizer.param_groups[1]['lr'])  # Record landmark LR for the epoch
         history['lr_gaze'].append(optimizer.param_groups[2]['lr'])  # Record gaze LR for the epoch
         history['lr_head_pose'].append(optimizer.param_groups[3]['lr'])  # Record head pose LR for the epoch
+
+        # Record AWL parameters
+        with torch.no_grad():
+            sigmas = torch.exp(awl.log_sigma).detach().cpu().numpy().tolist()
+            # Calculate weights as precision values (1 / (2 * sigma^2))
+            awl_weights = [1.0 / (2.0 * sigma**2) for sigma in sigmas]
+            
+        history['awl_weights'].append(awl_weights)
 
         train_total_loss, train_lmk_loss, train_gaze_loss, train_head_pose_loss, train_nme, train_ang_err, train_head_ang_err = train_one_epoch(model, train_loader, landmark_criterion, yaw_criterion, pitch_criterion, theta_criterion, phi_criterion, optimizer, scaler, device, epoch, args, landmark_key, awl)
         val_total_loss, val_lmk_loss, val_gaze_loss, val_head_pose_loss, val_nme, val_ang_err, val_head_ang_err = validate(model, val_loader, landmark_criterion, yaw_criterion, pitch_criterion, theta_criterion, phi_criterion, device, args, landmark_key, awl)
