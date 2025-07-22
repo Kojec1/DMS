@@ -38,15 +38,18 @@ def load_checkpoint(filepath, model, optimizer, scheduler, scaler):
         checkpoint = torch.load(filepath)
         start_epoch = checkpoint['epoch'] + 1
         model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if optimizer is not None:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if scheduler is not None and 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict'] is not None:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         if scaler is not None and 'scaler_state_dict' in checkpoint:
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
         print(f"Loaded checkpoint '{filepath}' (epoch {checkpoint['epoch']})")
+
         return start_epoch
     else:
         print(f"No checkpoint found at '{filepath}'")  
+        
         return 0
 
 def save_history(history, filepath):

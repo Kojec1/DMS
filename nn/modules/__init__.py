@@ -1,5 +1,3 @@
-from .bottleneck.convnext import convnext_tiny
-from .head import HPHead
-from .DANet import DANet
+from .model import MHModel
 
-__all__ = ['convnext_tiny', 'HPHead', 'DANet'] 
+__all__ = ['MHModel'] 

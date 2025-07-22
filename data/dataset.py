@@ -2,13 +2,20 @@ from torch.utils.data import Dataset
 import os
 import numpy as np
 import torch
-from PIL import Image, ImageOps
+from PIL import Image
 import torchvision.transforms.functional as TF
 import random
 from .augmentation import horizontal_flip, normalize_landmarks, crop_to_content, apply_clahe, random_affine_with_landmarks, landmarks_smoothing, crop_to_landmarks
+import cv2
+import h5py
+import bisect
+from tqdm import tqdm
+
 
 class BaseDataset(Dataset):
-    """Base PyTorch Dataset template. Custom datasets should inherit from this class."""
+    """
+    Base PyTorch Dataset template. Custom datasets should inherit from this class.
+    """
     def __init__(self, transform=None):
         self.transform = transform
 
@@ -22,7 +29,7 @@ class BaseDataset(Dataset):
     
     
 class MPIIFaceGazeDataset(BaseDataset):
-    """
+    """ 
     Landmarks:
     - 0: Left outer eye
     - 1: Left inner eye
@@ -31,7 +38,7 @@ class MPIIFaceGazeDataset(BaseDataset):
     - 4: Left mouth
     - 5: Right mouth
     """
-    def __init__(self, dataset_path, participant_ids, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0):
+    def __init__(self, dataset_path, participant_ids, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, input_channels=1, use_clahe=False, angle_bin_width=3.0, num_angle_bins=14):
         super().__init__(transform)
         self.dataset_path = dataset_path
         self.samples = []
@@ -39,7 +46,11 @@ class MPIIFaceGazeDataset(BaseDataset):
         self.affine_aug = affine_aug
         self.flip_aug = flip_aug
         self.use_cache = use_cache
-        self.label_smoothing = label_smoothing 
+        self.label_smoothing = label_smoothing
+        self.input_channels = input_channels
+        self.use_clahe = use_clahe
+        self.angle_bin_width = angle_bin_width
+        self.num_angle_bins = num_angle_bins
         
         if self.use_cache:
             self.image_cache = {}
@@ -92,6 +103,7 @@ class MPIIFaceGazeDataset(BaseDataset):
                         
                         if norm_gaze_direction_val == 0:
                             # Handle zero vector case for gaze direction
+                            normalized_gaze_vec = np.array([0.0, 0.0, -1.0], dtype=np.float32)  # Default forward direction
                             pitch = 0.0
                             yaw = 0.0
                         else:
@@ -113,7 +125,7 @@ class MPIIFaceGazeDataset(BaseDataset):
                             'face_center_cam': face_center_cam_np,
                             'gaze_target_cam': gaze_target_cam_np,
                             'eval_eye': eval_eye_str,
-                            'gaze_direction_cam_3d': gaze_direction_cam_3d.astype(np.float32),
+                            'gaze_direction_cam_3d': normalized_gaze_vec.astype(np.float32),
                             'gaze_2d_angles': gaze_2d_angles_np
                         }
                         self.samples.append(sample_data)
@@ -125,6 +137,24 @@ class MPIIFaceGazeDataset(BaseDataset):
                         print(f"Warning: IndexError processing line {line_idx+1} in {annotation_file}: '{line.strip()}'. Error: {e}. Skipping.")
                         continue
 
+    def _normalize_gaze_to_head(self, gaze_cam_np: np.ndarray, head_rvec_np: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Rotate 3-D gaze direction from camera to head coordinate system."""
+        if np.linalg.norm(gaze_cam_np) == 0:
+            # Degenerate – return default forward direction.
+            return np.array([0.0, 0.0, -1.0], dtype=np.float32), np.array([0.0, 0.0], dtype=np.float32)
+
+        # Rotation matrix: head -> camera.  We need camera -> head, i.e. R^T.
+        R_head2cam, _ = cv2.Rodrigues(head_rvec_np.astype(np.float32))
+        R_cam2head = R_head2cam.T  # inverse because R is orthonormal
+
+        gaze_head_np = R_cam2head @ gaze_cam_np.astype(np.float32)
+        gaze_head_np = gaze_head_np / (np.linalg.norm(gaze_head_np) + 1e-6)
+
+        pitch = np.arcsin(np.clip(-gaze_head_np[1], -1.0, 1.0))
+        yaw = np.arctan2(-gaze_head_np[0], -gaze_head_np[2])
+        gaze_angles_np = np.array([pitch, yaw], dtype=np.float32)
+        
+        return gaze_head_np.astype(np.float32), gaze_angles_np
 
     def __len__(self):
         return len(self.samples)
@@ -133,9 +163,8 @@ class MPIIFaceGazeDataset(BaseDataset):
         sample = self.samples[index]
         image_path = sample['image_path']
         
-        # Make a fresh copy of landmarks and gaze angles from metadata each time
+        # Make a fresh copy of landmarks; gaze will be recomputed after head-pose normalisation
         landmarks = sample['facial_landmarks'].copy()
-        gaze_angles = sample['gaze_2d_angles'].copy()
 
         image = None
 
@@ -143,13 +172,18 @@ class MPIIFaceGazeDataset(BaseDataset):
             image, landmarks = self.image_cache[image_path]
             landmarks = landmarks.copy() 
         else:
-            image = Image.open(image_path).convert('L') # Load and convert to grayscale
+            image = Image.open(image_path)
+            if self.input_channels == 1:
+                image = image.convert('L')
+            else:
+                image = image.convert('RGB')
 
             # Crop to non-black region (content crop)
             image, landmarks = crop_to_content(image, landmarks, non_black_threshold=1)
             
             # Apply CLAHE 
-            image = apply_clahe(image) # Uses default clipLimit=2.0, tileGridSize=(8,8)
+            if self.use_clahe:
+                image = apply_clahe(image) # Uses default clipLimit=2.0, tileGridSize=(8,8)
 
             if self.use_cache:
                 self.image_cache[image_path] = (image.copy(), landmarks.copy())  # Store copies
@@ -159,17 +193,21 @@ class MPIIFaceGazeDataset(BaseDataset):
          
         effective_width, effective_height = image.size 
 
+        # --- Head-pose normalisation (rotate gaze into head coordinate system) ---
+        gaze_3d_direction_head, gaze_2d_angles = self._normalize_gaze_to_head(
+            sample['gaze_direction_cam_3d'], sample['head_pose_rvec'])
+        # gaze_3d_direction_head = sample['gaze_direction_cam_3d']
+        # gaze_2d_angles = sample['gaze_2d_angles']
+
         # Affine Augmentation (if training)
         if self.is_train and self.affine_aug and random.random() > 0.5:
-            image, landmarks, gaze_angles = random_affine_with_landmarks(image, landmarks, gaze_angles)
+            image, landmarks, gaze_2d_angles, gaze_3d_direction_head = random_affine_with_landmarks(
+                image, landmarks, gaze_2d_angles, gaze_3d_direction_head)
 
         # Horizontal Flip (if training)
         if self.is_train and self.flip_aug and random.random() > 0.5:
-            image, landmarks, gaze_angles = horizontal_flip(image, landmarks, gaze_angles, effective_width)
-            # Swap landmark indices after horizontal flip
-            # Original: 0:L_outer, 1:L_inner, 2:R_inner, 3:R_outer, 4:L_mouth, 5:R_mouth
-            # Flipped:  0:R_outer, 1:R_inner, 2:L_inner, 3:L_outer, 4:R_mouth, 5:L_mouth
-            landmarks = landmarks[[3, 2, 1, 0, 5, 4], :]
+            image, landmarks, gaze_2d_angles, gaze_3d_direction_head = horizontal_flip(
+                image, landmarks, gaze_2d_angles, effective_width, gaze_3d_direction_head)
 
         # Normalize landmarks to [0, 1]
         landmarks = normalize_landmarks(landmarks, effective_width, effective_height)
@@ -192,8 +230,31 @@ class MPIIFaceGazeDataset(BaseDataset):
         item_to_return['head_pose_tvec'] = torch.from_numpy(sample['head_pose_tvec'])
         item_to_return['face_center_cam'] = torch.from_numpy(sample['face_center_cam'])
         item_to_return['gaze_target_cam'] = torch.from_numpy(sample['gaze_target_cam'])
-        item_to_return['gaze_direction_cam_3d'] = torch.from_numpy(sample['gaze_direction_cam_3d'])
-        item_to_return['gaze_2d_angles'] = torch.from_numpy(gaze_angles.astype(np.float32))
+        item_to_return['gaze_direction_cam_3d'] = torch.from_numpy(gaze_3d_direction_head.astype(np.float32))
+        item_to_return['gaze_2d_angles'] = torch.from_numpy(gaze_2d_angles.astype(np.float32))
+        
+        # Bin encoding for yaw / pitch
+        num_bins = self.num_angle_bins
+        bin_width = self.angle_bin_width
+
+        def _angle_to_bin(angle_rad: float) -> int:
+            angle_deg = np.degrees(angle_rad)
+            half_range = (num_bins * bin_width) / 2.0
+            idx = int(np.floor((angle_deg + half_range) / bin_width))
+            idx = np.clip(idx, 0, num_bins - 1)
+            return idx
+
+        pitch_bin_idx = _angle_to_bin(gaze_2d_angles[0])
+        yaw_bin_idx = _angle_to_bin(gaze_2d_angles[1])
+
+        # One-hot vectors
+        pitch_onehot = np.zeros(num_bins, dtype=np.float32)
+        yaw_onehot = np.zeros(num_bins, dtype=np.float32)
+        pitch_onehot[pitch_bin_idx] = 1.0
+        yaw_onehot[yaw_bin_idx] = 1.0
+
+        item_to_return['pitch_bin_onehot'] = torch.from_numpy(pitch_onehot)
+        item_to_return['yaw_bin_onehot'] = torch.from_numpy(yaw_onehot)
         
         # Non-tensor data
         item_to_return['eval_eye'] = sample['eval_eye'] # String
@@ -215,7 +276,7 @@ class WFLWDataset(BaseDataset):
     - 76: Left mouth
     - 82 Right mouth
     """
-    def __init__(self, annotation_file, images_dir, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, mpii_landmarks=False):
+    def __init__(self, annotation_file, images_dir, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, mpii_landmarks=False, input_channels=1, use_clahe=False):
         super().__init__(transform)
         self.annotation_file = annotation_file
         self.images_dir = images_dir
@@ -226,6 +287,8 @@ class WFLWDataset(BaseDataset):
         self.use_cache = use_cache
         self.label_smoothing = label_smoothing
         self.mpii_landmarks = mpii_landmarks
+        self.input_channels = input_channels
+        self.use_clahe = use_clahe
 
         if self.use_cache:
             self.image_cache = {}
@@ -300,7 +363,11 @@ class WFLWDataset(BaseDataset):
             image, landmarks = self.image_cache[image_path]
             landmarks = landmarks.copy()
         else:
-            image = Image.open(image_path).convert('L')
+            image = Image.open(image_path)
+            if self.input_channels == 1:
+                image = image.convert('L')
+            else:
+                image = image.convert('RGB')
             
             # Crop based on bounding box
             x_min, y_min, x_max, y_max = bbox
@@ -321,7 +388,8 @@ class WFLWDataset(BaseDataset):
             landmarks[:, 1] -= y_min
             
             # Apply CLAHE
-            image = apply_clahe(image)
+            if self.use_clahe:
+                image = apply_clahe(image)
 
             if self.use_cache:
                 self.image_cache[image_path] = (image.copy(), landmarks.copy())
@@ -333,11 +401,11 @@ class WFLWDataset(BaseDataset):
 
         # Affine Augmentation
         if self.is_train and self.affine_aug and random.random() > 0.5:
-            image, landmarks = random_affine_with_landmarks(image, landmarks)
+            image, landmarks, _, _ = random_affine_with_landmarks(image, landmarks)
 
         # Horizontal Flip
         if self.is_train and self.flip_aug and random.random() > 0.5:
-            image, landmarks = horizontal_flip(image, landmarks, effective_width)
+            image, landmarks, _, _ = horizontal_flip(image, landmarks, effective_width=effective_width)
             # WFLW landmark flipping indices (symmetric pairs)
             flip_indices = [32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16,
                            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
@@ -393,7 +461,7 @@ class Face300WDataset(BaseDataset):
     - 48: Left mouth
     - 54: Right mouth
     """
-    def __init__(self, root_dir, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, subset=None, mpii_landmarks=False, padding_ratio=0.3, translation_ratio=0.2, train_test_split=0.8, split='train', split_seed=42):
+    def __init__(self, root_dir, transform=None, is_train=False, affine_aug=True, flip_aug=True, use_cache=False, label_smoothing=0.0, subset=None, mpii_landmarks=False, padding_ratio=0.3, translation_ratio=0.2, train_test_split=0.8, split='train', split_seed=42, input_channels=1, use_clahe=False):
         super().__init__(transform)
         self.root_dir = root_dir
         self.samples = []
@@ -409,6 +477,8 @@ class Face300WDataset(BaseDataset):
         self.train_test_split = train_test_split  # Ratio of training data (0.0 to 1.0)
         self.split = split  # 'train' or 'test'
         self.split_seed = split_seed  # Seed for reproducible splits
+        self.input_channels = input_channels
+        self.use_clahe = use_clahe
         
         if self.use_cache:
             self.image_cache = {}
@@ -569,7 +639,11 @@ class Face300WDataset(BaseDataset):
             image, landmarks = self.image_cache[image_path]
             landmarks = landmarks.copy()
         else:
-            image = Image.open(image_path).convert('L')
+            image = Image.open(image_path)
+            if self.input_channels == 1:
+                image = image.convert('L')
+            else:
+                image = image.convert('RGB')
 
             # Crop to face region based on landmarks with padding and optional random translation
             translation_ratio = self.translation_ratio if self.is_train else 0.0
@@ -578,7 +652,8 @@ class Face300WDataset(BaseDataset):
                                                translation_ratio=translation_ratio)
             
             # Apply CLAHE
-            image = apply_clahe(image)
+            if self.use_clahe:
+                image = apply_clahe(image)
 
             if self.use_cache:
                 self.image_cache[image_path] = (image.copy(), landmarks.copy())
@@ -590,11 +665,11 @@ class Face300WDataset(BaseDataset):
 
         # Affine Augmentation
         if self.is_train and self.affine_aug and random.random() > 0.5:
-            image, landmarks = random_affine_with_landmarks(image, landmarks)
+            image, landmarks, _, _ = random_affine_with_landmarks(image, landmarks)
 
         # Horizontal Flip
         if self.is_train and self.flip_aug and random.random() > 0.5:
-            image, landmarks = horizontal_flip(image, landmarks, effective_width)
+            image, landmarks, _, _ = horizontal_flip(image, landmarks, effective_width=effective_width)
             # 68-point landmark flipping indices (iBUG 68-point standard)
             flip_indices = [16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
                            26, 25, 24, 23, 22, 21, 20, 19, 18, 17,
@@ -629,3 +704,259 @@ class Face300WDataset(BaseDataset):
         item_to_return['image_path'] = image_path
 
         return item_to_return
+
+
+class MPIIFaceGazeMatDataset(BaseDataset):
+    """
+    Dataset class for MPIIFaceGaze normalized .mat files.
+    """
+    def __init__(self,
+                 dataset_path: str,
+                 participant_ids: list[int] | None = None,
+                 transform=None,
+                 input_channels: int = 3,
+                 use_cache: bool = False,
+                 use_clahe: bool = False,
+                 downscale_size: int | tuple[int, int] | None = 224,
+                 affine_aug: bool = False,
+                 horizontal_flip: bool = False,
+                 angle_bin_width: float = 3.0,
+                 num_angle_bins: int = 14,
+                 label_smoothing: float = 0.1):
+        super().__init__(transform)
+        self.dataset_path = dataset_path
+        self.input_channels = input_channels
+        self.use_cache = use_cache
+        self.use_clahe = use_clahe
+        self.downscale_size = downscale_size
+        self.affine_aug = affine_aug
+        self.horizontal_flip = horizontal_flip
+        self.angle_bin_width = angle_bin_width
+        self.num_angle_bins = num_angle_bins
+        self.label_smoothing = label_smoothing
+
+        if participant_ids is None:
+            participant_ids = list(range(15))
+
+        # Hold file-level metadata so that we can locate a sample quickly.
+        self.files = []
+        cumulative_samples = 0
+        for pid in participant_ids:
+            mat_path = os.path.join(self.dataset_path, f"p{pid:02d}.mat")
+            if not os.path.isfile(mat_path):
+                print(f"Warning: MAT file not found: {mat_path}. Skipping participant {pid}.")
+                continue
+            with h5py.File(mat_path, 'r') as f:
+                if 'Data' not in f or 'label' not in f['Data']:
+                    print(f"Warning: Unexpected MAT structure in {mat_path}. Skipping.")
+                    continue
+                n_samples = f['Data']['label'].shape[0]
+
+            self.files.append({'path': mat_path, 'n_samples': n_samples, 'cumulative_start': cumulative_samples})
+            cumulative_samples += n_samples
+
+        self.total_samples = cumulative_samples
+        if self.total_samples == 0:
+            raise RuntimeError("No samples found in the provided participant list and dataset path.")
+
+        # Workaround for compatibility with the training code
+        self.samples = list(range(self.total_samples))
+
+        # Pre-compute cumulative starts to locate a sample with bisect.
+        self._cumulative_starts = [info['cumulative_start'] for info in self.files] + [self.total_samples]
+
+        # Optional in-memory cache for PIL images keyed by (file_path, local_idx)
+        if self.use_cache:
+            self.image_cache: dict[tuple[str, int], Image.Image] = {}
+            print("Image caching enabled for MPIIFaceGazeMatDataset.")
+            self._preload_cache()
+            print(f"Pre-loaded {len(self.image_cache)} images into cache.")
+
+    def _preload_cache(self):
+        """Pre-load all images and labels into cache during initialization."""
+        for global_idx in tqdm(range(self.total_samples), desc="Loading images to cache"):
+            file_info, local_idx = self._locate_sample(global_idx)
+            cache_key = (file_info['path'], local_idx)
+
+            # Load raw data
+            img_pil, gaze_2d_angles_np, head_pose_angles_np, landmarks_np = self._load_from_mat(
+                file_info['path'], local_idx)
+
+            # Grayscale conversion (optional)
+            if self.input_channels == 1 and img_pil.mode != 'L':
+                img_pil = img_pil.convert('L')
+            elif self.input_channels == 3 and img_pil.mode != 'RGB':
+                img_pil = img_pil.convert('RGB')
+
+            # CLAHE (optional)
+            if self.use_clahe:
+                img_pil = apply_clahe(img_pil)
+
+            # Down-scaling
+            effective_width, effective_height = img_pil.size
+            if self.downscale_size is not None:
+                if isinstance(self.downscale_size, int):
+                    target_size = (self.downscale_size, self.downscale_size)
+                else:
+                    target_size = self.downscale_size
+                scale_x = target_size[1] / effective_width
+                scale_y = target_size[0] / effective_height
+                img_pil = img_pil.resize(target_size, Image.BILINEAR)
+                landmarks_np[:, 0] *= scale_x
+                landmarks_np[:, 1] *= scale_y
+                effective_width, effective_height = target_size[1], target_size[0]
+
+            # Store in cache
+            self.image_cache[cache_key] = (
+                img_pil.copy(),
+                gaze_2d_angles_np.copy(),
+                head_pose_angles_np.copy(),
+                landmarks_np.copy(),
+            )
+
+    def _locate_sample(self, global_idx: int) -> tuple[dict, int]:
+        """Return (file_info_dict, local_idx) for the *global* dataset index."""
+        file_idx = bisect.bisect_right(self._cumulative_starts, global_idx) - 1
+        file_info = self.files[file_idx]
+        local_idx = global_idx - file_info['cumulative_start']
+
+        return file_info, local_idx 
+
+    def _load_from_mat(self, file_path: str, local_idx: int):
+        """Read image and label for local_idx from file_path."""
+        with h5py.File(file_path, 'r') as f:
+            data_grp = f['Data']
+            # Load image
+            img_np = data_grp['data'][local_idx]  # shape (3, H, W) – BGR, uint8
+            img_np = np.transpose(img_np, (1, 2, 0))  # (H, W, C)
+            # BGR to RGB
+            img_np = img_np[:, :, ::-1]
+            # Horizontal flip
+            img_np = np.fliplr(img_np)
+            # Convert to PIL
+            img_pil = Image.fromarray(img_np.astype(np.uint8))
+
+            # Load labels
+            label_np = data_grp['label'][local_idx].astype(np.float32)  # (16,)
+            gaze_2d_angles_np = label_np[0:2]  # pitch, yaw (radians)
+            head_pose_angles_np = label_np[2:4]
+            landmarks_flat = label_np[4:16]  # 12 values
+            landmarks_np = landmarks_flat.reshape(6, 2)  # (6,2) in pixel coords
+            # Update landmarks x after horizontal flip (448px image width)
+            landmarks_np[:, 0] = 448.0 - landmarks_np[:, 0]
+
+            # Flip yaw sign due to horizontal flip
+            gaze_2d_angles_np[1] *= -1.0
+            head_pose_angles_np[1] *= -1.0
+
+        return img_pil, gaze_2d_angles_np, head_pose_angles_np, landmarks_np
+    
+    def _angle_to_bin(self, angle_rad: float) -> int:
+        angle_deg = np.degrees(angle_rad)
+        half_range = (self.num_angle_bins * self.angle_bin_width) / 2.0
+        idx = int(np.floor((angle_deg + half_range) / self.angle_bin_width))
+        idx = np.clip(idx, 0, self.num_angle_bins - 1)
+
+        return idx
+
+    def __len__(self):
+        return self.total_samples
+
+    def __getitem__(self, index):
+        # Locate sample
+        file_info, local_idx = self._locate_sample(index)
+        cache_key = (file_info['path'], local_idx)
+        if self.use_cache:
+            # All images are pre-cached during initialization
+            if cache_key not in self.image_cache:
+                raise RuntimeError(f"Cache miss for pre-loaded data at index {index}. This should not happen.")
+            
+            # Retrieve fully-processed data
+            img_pil, gaze_2d_angles_np, head_pose_angles_np, landmarks_np = self.image_cache[cache_key]
+
+            gaze_2d_angles_np = gaze_2d_angles_np.copy()
+            head_pose_angles_np = head_pose_angles_np.copy()
+            landmarks_np = landmarks_np.copy()
+        else:
+            # Load raw data
+            img_pil, gaze_2d_angles_np, head_pose_angles_np, landmarks_np = self._load_from_mat(
+                file_info['path'], local_idx)
+
+            # CLAHE (optional)
+            if self.use_clahe:
+                img_pil = apply_clahe(img_pil)
+
+            # Grayscale conversion (optional)
+            if self.input_channels == 1 and img_pil.mode != 'L':
+                img_pil = img_pil.convert('L')
+            elif self.input_channels == 3 and img_pil.mode != 'RGB':
+                img_pil = img_pil.convert('RGB')
+
+            # Down-scaling (optional)
+            effective_width, effective_height = img_pil.size
+            if self.downscale_size is not None:
+                if isinstance(self.downscale_size, int):
+                    target_size = (self.downscale_size, self.downscale_size)
+                else:
+                    target_size = self.downscale_size  # (H, W)
+                scale_x = target_size[1] / effective_width
+                scale_y = target_size[0] / effective_height
+                img_pil = img_pil.resize(target_size, Image.BILINEAR)
+                # Adjust landmarks to new resolution
+                landmarks_np[:, 0] *= scale_x
+                landmarks_np[:, 1] *= scale_y
+                effective_width, effective_height = target_size[1], target_size[0]
+
+        # Affine Augmentation
+        if self.affine_aug and random.random() > 0.5:
+            img_pil, landmarks_np, gaze_2d_angles_np, head_pose_angles_np = random_affine_with_landmarks(
+                img_pil, 
+                landmarks_np, 
+                gaze_2d_angles_np=gaze_2d_angles_np,
+                head_2d_angles_np=head_pose_angles_np,
+                degrees=(-10, 10),
+                translate_fractions=(0.1, 0.1),
+                scale_range=(0.8, 1.2)
+            )
+
+        # Horizontal flip (Optional)
+        if self.horizontal_flip and random.random() > 0.5:
+            img_pil, landmarks_np, gaze_2d_angles_np, head_pose_angles_np = horizontal_flip(
+                img_pil, landmarks_np, gaze_2d_angles_np, head_pose_angles_np, effective_width=img_pil.size[0]
+            )
+
+        # Normalize landmarks
+        landmarks_np = normalize_landmarks(landmarks_np, img_pil.size[0], img_pil.size[1])
+
+        # Apply label smoothing
+        if self.label_smoothing > 0:
+            landmarks_np = landmarks_smoothing(landmarks_np, smoothing_factor=self.label_smoothing)
+
+        # Apply transform
+        item = {}
+        if self.transform:
+            item['image'] = self.transform(img_pil)
+        else:
+            item['image'] = TF.to_tensor(img_pil)
+
+        # Numerical labels
+        item['gaze_2d_angles'] = torch.from_numpy(gaze_2d_angles_np.astype(np.float32))
+        item['head_pose_angles'] = torch.from_numpy(head_pose_angles_np.astype(np.float32))
+        item['facial_landmarks'] = torch.from_numpy(landmarks_np.astype(np.float32))
+
+        # Bin encoding for yaw / pitch
+        pitch_bin_idx = self._angle_to_bin(gaze_2d_angles_np[0])
+        yaw_bin_idx = self._angle_to_bin(gaze_2d_angles_np[1])
+        pitch_onehot = np.zeros(self.num_angle_bins, dtype=np.float32)
+        yaw_onehot = np.zeros(self.num_angle_bins, dtype=np.float32)
+        pitch_onehot[pitch_bin_idx] = 1.0
+        yaw_onehot[yaw_bin_idx] = 1.0
+        item['pitch_bin_onehot'] = torch.from_numpy(pitch_onehot)
+        item['yaw_bin_onehot'] = torch.from_numpy(yaw_onehot)
+
+        # Meta-information
+        item['file_path'] = file_info['path']
+        item['local_idx'] = local_idx
+
+        return item
+    
