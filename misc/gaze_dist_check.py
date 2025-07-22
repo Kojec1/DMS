@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-MPII Gaze Dataset Distribution Analyzer
-
-This script analyzes the gaze angle distribution in the MPII Face Gaze dataset:
-- Loads gaze data from .mat files
-- Converts from radians to degrees  
-- Displays min/max values for pitch and yaw
-- Creates heatmap visualizations of gaze angle frequency
-"""
-
 import os
 import sys
 import h5py

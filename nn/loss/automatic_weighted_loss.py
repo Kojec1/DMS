@@ -4,7 +4,9 @@ import math
 from typing import Optional
 
 class AutomaticWeightedLoss(nn.Module):
-    """Automatically weighted multi–task loss (Kendall et al., 2018)."""
+    """
+    Automatically weighted multi–task loss (Kendall et al., 2018).
+    """
     def __init__(self, num_tasks: int, init_sigmas: list[float] | float = 1.0, dtype: Optional[torch.dtype] = None):
         super().__init__()
         if isinstance(init_sigmas, (int, float)):

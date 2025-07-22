@@ -5,12 +5,15 @@ import numpy as np
 import argparse
 import os
 import random
+import math
 from PIL import Image
 
 from nn.modules.facial_landmark_estimator import FacialLandmarkEstimator
 from data.dataset import MPIIFaceGazeDataset, WFLWDataset, Face300WDataset
 from utils.misc import set_seed
 from nn.metrics.landmark_metrics import NME
+from nn.modules.model import MHModel  # Multi-head model for landmarks + gaze
+from nn.metrics.gaze_metrics import angular_error
 
 
 def get_args():
@@ -58,38 +61,85 @@ def get_args():
                         help='Random seed for reproducible train/test splits in 300W dataset (default: 42)')
     parser.add_argument('--data_split', type=str, choices=['train', 'test'], default='test',
                         help='Which split to visualize for 300W dataset (default: test)')
+    parser.add_argument('--tasks', type=str, default='landmarks',
+                        help='Comma-separated list of tasks to visualise: "landmarks", "gaze"')
+    parser.add_argument('--annotation_mode', type=str, default='both',
+                        choices=['none', 'gt', 'pred', 'both'],
+                        help='What annotations to overlay on images: none | gt | pred | both')
+    parser.add_argument('--num_angle_bins', type=int, default=14,
+                        help='Number of angle bins for yaw/pitch heads (MHModel)')
+    parser.add_argument('--angle_bin_width', type=float, default=3.0,
+                        help='Bin width (degrees) used during training (MHModel)')
     
     return parser.parse_args()
 
 
-def load_model_for_visualization(checkpoint_path, num_landmarks, device, in_channels):
-    model = FacialLandmarkEstimator(
-        num_landmarks=num_landmarks, 
-        pretrained_backbone=False,
-        in_channels=in_channels,
-    )
+def load_model_for_visualization(checkpoint_path, num_landmarks, device, in_channels, tasks, num_angle_bins):
+    """Instantiate and load model depending on requested tasks.
+
+    • If 'gaze' is in tasks, we assume a multi-head model (landmarks + gaze).
+    • Otherwise, fall back to the landmark-only estimator.
+    """
+
+    want_gaze = 'gaze' in tasks
+
+    if want_gaze:
+        model = MHModel(
+            num_landmarks=num_landmarks,
+            pretrained_backbone=False,
+            in_channels=in_channels,
+            num_bins=num_angle_bins,
+        )
+    else:
+        model = FacialLandmarkEstimator(
+            num_landmarks=num_landmarks,
+            pretrained_backbone=False,
+            in_channels=in_channels,
+        )
+
     if not os.path.isfile(checkpoint_path):
         print(f"Error: Checkpoint file not found at {checkpoint_path}")
         return None
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    
-    # Handle potential keys like 'model_state_dict' or direct state_dict
-    if 'model_state_dict' in checkpoint:
-        model_state_dict = checkpoint['model_state_dict']
-    elif 'model' in checkpoint:
-        model_state_dict = checkpoint['model']
-    else:
-        model_state_dict = checkpoint
 
-    model.load_state_dict(model_state_dict)
+    # State-dict handling
+    if 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    elif 'model' in checkpoint:
+        state_dict = checkpoint['model']
+    else:
+        state_dict = checkpoint
+
+    # Try strict loading first; if it fails, fall back to non-strict (for safety)
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except RuntimeError as e:
+        print(f"Warning: strict load failed ({e}). Trying non-strict load…")
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f" → Missing keys: {missing}")
+        if unexpected:
+            print(f" → Unexpected keys: {unexpected}")
+
     model.to(device)
     model.eval()
-    print(f"Model loaded successfully with {in_channels} input channel(s).")
+
+    model_type = 'MHModel' if want_gaze else 'FacialLandmarkEstimator'
+    print(f"Loaded {model_type} with {in_channels} input channel(s).")
     return model
 
-def plot_image_and_landmarks(ax, image_tensor_cpu, true_landmarks, pred_landmarks, current_mean, current_std):
-    """Plots the image with true and predicted landmarks."""
+def plot_image_and_landmarks(
+    ax,
+    image_tensor_cpu,
+    true_landmarks,
+    pred_landmarks,
+    current_mean,
+    current_std,
+    show_gt: bool = True,
+    show_pred: bool = True,
+):
+    """Plot image and optionally overlay landmarks."""
     # Unnormalize the image tensor
     img_unnormalized = image_tensor_cpu.clone()
     # Ensure current_mean and current_std are tensors for consistent indexing
@@ -109,24 +159,40 @@ def plot_image_and_landmarks(ax, image_tensor_cpu, true_landmarks, pred_landmark
     else:
         print(f"Warning: Unexpected image tensor shape for display: {img_display_np.shape}")
 
-    img_display_np = np.clip(img_display_np, 0, 1) # Ensure values are in [0,1] for display
+    img_display_np = np.clip(img_display_np, 0, 1)  # Ensure values are in [0,1] for display
 
     # Display image
     if img_display_np.ndim == 2 or (img_display_np.ndim == 3 and img_display_np.shape[-1] == 1):
         ax.imshow(img_display_np, cmap='gray', vmin=0, vmax=1)
     else:
         ax.imshow(img_display_np, vmin=0, vmax=1)
-    
+
+    # If no annotations requested, finish here
+    if not show_gt and not show_pred:
+        ax.axis('off')
+        return
+
     true_lmks = true_landmarks.cpu().numpy().reshape(-1, 2)
     pred_lmks = pred_landmarks.cpu().numpy().reshape(-1, 2)
 
-    ax.plot(true_lmks[:, 0], true_lmks[:, 1], 'o', color='lime', markersize=3, label='Ground Truth')
-    ax.plot(pred_lmks[:, 0], pred_lmks[:, 1], 'x', color='red', markersize=3, label='Predicted')
+    if show_gt:
+        ax.plot(true_lmks[:, 0], true_lmks[:, 1], 'o', color='lime', markersize=3, label='Ground Truth')
+    if show_pred:
+        ax.plot(pred_lmks[:, 0], pred_lmks[:, 1], 'x', color='red', markersize=3, label='Predicted')
     
     ax.axis('off') # Hide axes ticks
 
+def _draw_gaze_arrow(ax, pitch_rad: float, yaw_rad: float, origin_xy: tuple[float, float], length: float = 40.0, color: str = 'blue') -> None:
+    """Draw a 2-D arrow approximating gaze direction given pitch/yaw (in *radians*)."""
+    ox, oy = origin_xy
+    dx = -length * np.sin(yaw_rad)
+    dy = -length * np.sin(pitch_rad)
+    ax.arrow(ox, oy, dx, dy, color=color, head_width=3, head_length=4, linewidth=1.5)
+
 def main():
     args = get_args()
+
+    set_seed(42)
 
     if args.dataset == 'wflw' and not args.annotation_file:
         print("Error: --annotation_file is required for WFLW dataset")
@@ -160,8 +226,28 @@ def main():
     
     target_num_samples_to_display = original_rows * original_cols
 
+    # Parse tasks and annotation preferences
+    tasks_list = [t.strip().lower() for t in args.tasks.split(',') if t.strip()]
+    tasks_list = [t for t in tasks_list if t in {'landmarks', 'gaze'}]
+    if not tasks_list:
+        print("No valid tasks specified. Nothing to visualise (images only).")
+
+    show_gt_flag = args.annotation_mode in {'gt', 'both'}
+    show_pred_flag = args.annotation_mode in {'pred', 'both'}
+
+    if args.display_mode in {'correct', 'incorrect'} and 'landmarks' not in tasks_list:
+        print("Error: display_mode 'correct'/'incorrect' requires landmark predictions. Either include 'landmarks' in --tasks or change display_mode.")
+        return
+
     # Load Model
-    model = load_model_for_visualization(args.checkpoint_path, args.num_landmarks, device, args.input_channels)
+    model = load_model_for_visualization(
+        args.checkpoint_path,
+        args.num_landmarks,
+        device,
+        args.input_channels,
+        tasks_list,
+        args.num_angle_bins,
+    )
     if model is None:
         return
 
@@ -188,6 +274,9 @@ def main():
                 participant_ids=vis_participant_ids,
                 transform=vis_transform,
                 is_train=False,
+                use_cache=True,
+                affine_aug=False,
+                flip_aug=False
             )
             landmark_key = 'facial_landmarks'
 
@@ -272,8 +361,35 @@ def main():
                 true_landmarks_nme = sample[landmark_key].clone().float().view(1, num_landmarks_for_nme, 2).to(device)
 
                 with torch.no_grad():
-                    pred_landmarks_flat_nme = model(img_tensor_for_model).squeeze(0).cpu() 
-                pred_landmarks_nme = pred_landmarks_flat_nme.view(1, num_landmarks_for_nme, 2).to(device)
+                    model_out = model(img_tensor_for_model)
+
+                # Determine model output structure
+                if isinstance(model_out, tuple):
+                    pred_landmarks_from_model_normalized_flat = model_out[0].squeeze(0).cpu()
+
+                    # Gaze predictions (if requested)
+                    if 'gaze' in tasks_list:
+                        yaw_logits = model_out[1].squeeze(0)
+                        pitch_logits = model_out[2].squeeze(0)
+
+                        yaw_probs = torch.softmax(yaw_logits, dim=0)
+                        pitch_probs = torch.softmax(pitch_logits, dim=0)
+
+                        offsets = torch.arange(args.num_angle_bins, device=yaw_probs.device).float() - (args.num_angle_bins - 1) / 2.0
+
+                        yaw_pred_deg = args.angle_bin_width * torch.sum(yaw_probs * offsets).item()
+                        pitch_pred_deg = args.angle_bin_width * torch.sum(pitch_probs * offsets).item()
+
+                        yaw_pred_rad = np.deg2rad(yaw_pred_deg)
+                        pitch_pred_rad = np.deg2rad(pitch_pred_deg)
+                else:
+                    pred_landmarks_from_model_normalized_flat = model_out.squeeze(0).cpu()
+                    if 'gaze' in tasks_list:
+                        yaw_pred_rad = None
+                        pitch_pred_rad = None
+                        print("Warning: Model does not output gaze predictions.")
+
+                pred_landmarks_nme = pred_landmarks_from_model_normalized_flat.view(1, num_landmarks_for_nme, 2).to(device)
 
                 nme_value = NME(predictions=pred_landmarks_nme, 
                                 ground_truth=true_landmarks_nme,
@@ -338,12 +454,40 @@ def main():
         
         image_batch_for_model = image_tensor_resized.unsqueeze(0)
         with torch.no_grad():
-            pred_landmarks_from_model_normalized_flat = model(image_batch_for_model).squeeze(0).cpu()
-        
+            model_out = model(image_batch_for_model)
+
+        # Determine model output structure
+        if isinstance(model_out, tuple):
+            pred_landmarks_from_model_normalized_flat = model_out[0].squeeze(0).cpu()
+
+            # Gaze predictions
+            if 'gaze' in tasks_list:
+                yaw_logits = model_out[1].squeeze(0)
+                pitch_logits = model_out[2].squeeze(0)
+
+                yaw_probs = torch.softmax(yaw_logits, dim=0)
+                pitch_probs = torch.softmax(pitch_logits, dim=0)
+
+                offsets = torch.arange(args.num_angle_bins, device=yaw_probs.device).float() - (args.num_angle_bins - 1) / 2.0
+
+                yaw_pred_deg = args.angle_bin_width * torch.sum(yaw_probs * offsets).item()
+                pitch_pred_deg = args.angle_bin_width * torch.sum(pitch_probs * offsets).item()
+
+                yaw_pred_rad = np.deg2rad(yaw_pred_deg)
+                pitch_pred_rad = np.deg2rad(pitch_pred_deg)
+        else:
+            pred_landmarks_from_model_normalized_flat = model_out.squeeze(0).cpu()
+            if 'gaze' in tasks_list:
+                yaw_pred_rad = None
+                pitch_pred_rad = None
+                print("Warning: Model does not output gaze predictions.")
+
+        pred_landmarks_nme = pred_landmarks_from_model_normalized_flat.view(1, args.num_landmarks, 2).to(device)
+
         nme_value_for_display = -1.0
         try:
             true_lmks_nme_shape = true_landmarks_from_dataset_normalized.view(1, args.num_landmarks, 2).to(device)
-            pred_lmks_nme_shape = pred_landmarks_from_model_normalized_flat.view(1, args.num_landmarks, 2).to(device)
+            pred_lmks_nme_shape = pred_landmarks_nme.view(1, args.num_landmarks, 2).to(device)
             
             if args.num_landmarks > max(args.left_eye_idx, args.right_eye_idx):
                 nme_value_for_display = NME(predictions=pred_lmks_nme_shape, 
@@ -364,9 +508,66 @@ def main():
         scaled_pred_landmarks[:, 1] *= args.img_size
         pred_landmarks_for_plot = scaled_pred_landmarks.view(-1)
         
-        plot_image_and_landmarks(axes[i], image_tensor_resized.cpu(), true_landmarks_for_plot, pred_landmarks_for_plot, CURRENT_MEAN, CURRENT_STD)
-        
+        # Draw image
+        if 'landmarks' in tasks_list:
+            plot_image_and_landmarks(
+                axes[i],
+                image_tensor_resized.cpu(),
+                true_landmarks_for_plot,
+                pred_landmarks_for_plot,
+                CURRENT_MEAN,
+                CURRENT_STD,
+                show_gt=show_gt_flag,
+                show_pred=show_pred_flag,
+            )
+        else:
+            # Just show image
+            plot_image_and_landmarks(
+                axes[i],
+                image_tensor_resized.cpu(),
+                torch.empty(0),
+                torch.empty(0),
+                CURRENT_MEAN,
+                CURRENT_STD,
+                show_gt=False,
+                show_pred=False,
+            )
+
+        # Overlay gaze arrows
+        if 'gaze' in tasks_list and ('gaze_2d_angles' in sample_transformed):
+            origin = (args.img_size / 2.0, args.img_size / 2.0)
+            if show_gt_flag:
+                gt_pitch_rad = sample_transformed['gaze_2d_angles'][0].item()
+                gt_yaw_rad = sample_transformed['gaze_2d_angles'][1].item()
+                g = np.array([-np.sin(gt_yaw_rad), np.sin(gt_pitch_rad), -np.cos(gt_yaw_rad)])
+                g = g / np.linalg.norm(g)
+                gt_pitch_rad = np.arcsin(g[1])
+                gt_yaw_rad = np.arctan2(-g[0], -g[2])
+                _draw_gaze_arrow(axes[i], gt_pitch_rad, gt_yaw_rad, origin, length=40.0, color='lime')
+            if show_pred_flag and 'gaze' in tasks_list and isinstance(model_out, tuple):
+                if yaw_pred_rad is not None and pitch_pred_rad is not None:
+                    _draw_gaze_arrow(axes[i], pitch_pred_rad, yaw_pred_rad, origin, length=40.0, color='red')
+
+        # Angular error (gaze)
+        angular_error_val = None
+        if 'gaze' in tasks_list and yaw_pred_rad is not None and ('gaze_2d_angles' in sample_transformed):
+            gt_pitch_rad = sample_transformed['gaze_2d_angles'][0].item()
+            gt_yaw_rad = sample_transformed['gaze_2d_angles'][1].item()
+
+            try:
+                ae_tensor = angular_error(
+                    pred_pitch_deg=torch.tensor([math.degrees(pitch_pred_rad)]),
+                    pred_yaw_deg=torch.tensor([math.degrees(yaw_pred_rad)]),
+                    gt_pitch_deg=torch.tensor([math.degrees(gt_pitch_rad)]),
+                    gt_yaw_deg=torch.tensor([math.degrees(gt_yaw_rad)]),
+                )
+                angular_error_val = ae_tensor.item()
+            except Exception as e_ae:
+                print(f"Error computing angular error for sample {sample_idx_in_full_dataset}: {e_ae}")
+
         title_str = f"ID: {sample_idx_in_full_dataset}"
+        if angular_error_val is not None:
+            title_str += f" AE: {angular_error_val:.2f}°"
         if nme_value_for_display >= 0:
             title_str += f" NME: {nme_value_for_display:.4f}"
         axes[i].set_title(title_str)

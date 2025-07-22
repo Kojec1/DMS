@@ -1,22 +1,3 @@
-"""RCS-Loss: combined classification (cross-entropy) + regression (MAE/MSE) for gaze angle prediction.
-
-This implementation follows Abdelrahman *et al.* 2024 ("Fine-grained gaze estimation based on the combination of regression and classification losses").
-
-• A discrete set of equally-sized bins cover the full angular range.
-• The network outputs `num_bins` logits; soft-max yields probabilities `p_i`.
-• An expected angle \thetâ is recovered via the *soft arg-max*:
-      \thetâ = w * Σ p_i (i - (B-1)/2)
-  where `w` is the bin width and `i=0…B-1`.
-• Loss = CE(logits, bin_target) + α * regression(\thetâ, θ_gt).
-
-Notes
------
-- Binning helper works with arbitrary ranges by specifying `bin_width` and `num_bins`; angles outside the range are clamped.
-- Supports either MAE (default) or MSE as the regression metric.
-"""
-
-from __future__ import annotations
-
 from typing import Literal
 
 import torch
@@ -25,8 +6,10 @@ import torch.nn.functional as F
 
 
 class RCSLoss(nn.Module):
-    """Regression-Classification Separation loss for a single angle (yaw or pitch)."""
-
+    """
+    RCS-Loss: combined classification (cross-entropy) + regression (MAE/MSE) for gaze angle prediction.
+    This implementation follows "Fine-grained gaze estimation based on the combination of regression and classification losses" by Abdelrahman et al. 2024
+    """
     def __init__(
         self,
         num_bins: int,

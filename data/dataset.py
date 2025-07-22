@@ -2,7 +2,7 @@ from torch.utils.data import Dataset
 import os
 import numpy as np
 import torch
-from PIL import Image, ImageOps
+from PIL import Image
 import torchvision.transforms.functional as TF
 import random
 from .augmentation import horizontal_flip, normalize_landmarks, crop_to_content, apply_clahe, random_affine_with_landmarks, landmarks_smoothing, crop_to_landmarks
@@ -11,8 +11,11 @@ import h5py
 import bisect
 from tqdm import tqdm
 
+
 class BaseDataset(Dataset):
-    """Base PyTorch Dataset template. Custom datasets should inherit from this class."""
+    """
+    Base PyTorch Dataset template. Custom datasets should inherit from this class.
+    """
     def __init__(self, transform=None):
         self.transform = transform
 
@@ -704,7 +707,9 @@ class Face300WDataset(BaseDataset):
 
 
 class MPIIFaceGazeMatDataset(BaseDataset):
-    """Dataset class for MPIIFaceGaze normalized .mat files."""
+    """
+    Dataset class for MPIIFaceGaze normalized .mat files.
+    """
     def __init__(self,
                  dataset_path: str,
                  participant_ids: list[int] | None = None,

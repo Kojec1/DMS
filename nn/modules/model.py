@@ -32,11 +32,6 @@ class MHModel(nn.Module):
         if self.in_channels == 1:
             self._replace_first_conv_layer()
 
-        # Normalization layers
-        self.landmark_norm = norm_layer(self.backbone.out_features)
-        self.gaze_norm = norm_layer(self.backbone.out_features)
-        self.head_pose_norm = norm_layer(self.backbone.out_features)
-
         self.dropout = nn.Dropout(dropout_rate)
 
         # Heads
@@ -49,23 +44,19 @@ class MHModel(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass."""
         features = self.backbone(x)
+        features_flattened = torch.flatten(features, 1)
+        features_flattened = self.dropout(features_flattened)
 
         # Facial landmarks head
-        landmarks = self.landmark_norm(features)
-        landmarks = self.dropout(torch.flatten(landmarks, 1))
-        landmarks = self.landmark_head(landmarks)
+        landmarks = self.landmark_head(features_flattened)
 
         # Gaze head
-        gaze = self.gaze_norm(features)
-        gaze = self.dropout(torch.flatten(gaze, 1))
-        yaw_logits = self.yaw_head(gaze)
-        pitch_logits = self.pitch_head(gaze)
+        yaw_logits = self.yaw_head(features_flattened)
+        pitch_logits = self.pitch_head(features_flattened)
 
         # Head pose head
-        head_pose = self.head_pose_norm(features)
-        head_pose = self.dropout(torch.flatten(head_pose, 1))
-        theta_logits = self.theta_head(head_pose)
-        phi_logits = self.phi_head(head_pose)
+        theta_logits = self.theta_head(features_flattened)
+        phi_logits = self.phi_head(features_flattened)
 
         return landmarks, yaw_logits, pitch_logits, theta_logits, phi_logits
     
