@@ -611,7 +611,8 @@ def main():
         dropout_rate=args.dropout_rate,
         num_bins=args.num_angle_bins,
         num_theta_bins=args.num_theta_bins,
-        num_phi_bins=args.num_phi_bins
+        num_phi_bins=args.num_phi_bins,
+        backbone="mobilenet"
     ).to(device)
     
     print(f"Model: MHModel initialized with {args.num_landmarks} landmarks and {args.input_channels} input channel(s).")

@@ -13,5 +13,6 @@ def mobilenet_v2(pretrained: bool = False, **kwargs) -> nn.Module:
     # Remove the classification head and add pooling and flattening
     feature_extractor = nn.Sequential(*list(model.children())[:-1])
     feature_extractor.add_module('adaptive_avg_pool2d', nn.AdaptiveAvgPool2d((1, 1)))
+    feature_extractor.out_features = 1280
     
     return feature_extractor 
