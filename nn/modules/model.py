@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
 from torchvision.models.convnext import LayerNorm2d
-from nn.modules.bottleneck.convnext import convnext_tiny
+from nn.modules.bottleneck import convnext_tiny
+from nn.modules.bottleneck import mobilenet_v2
 from functools import partial
 
+from typing import Literal
 
 class MHModel(nn.Module):
     def __init__(self,
@@ -13,11 +15,16 @@ class MHModel(nn.Module):
                  dropout_rate: float = 0.2,
                  num_bins: int = 14,
                  num_theta_bins: int = 14,
-                 num_phi_bins: int = 14) -> None:
+                 num_phi_bins: int = 14,
+                 backbone: Literal['convnext', 'mobilenet'] = 'convnext') -> None:
         """Multi-Head model for landmarks and gaze estimation."""
         super().__init__()
 
-        self.backbone = convnext_tiny(pretrained=pretrained_backbone)
+        if backbone == 'convnext':
+            self.backbone = convnext_tiny(pretrained=pretrained_backbone)
+        else:
+            self.backbone = mobilenet_v2(pretrained=pretrained_backbone)
+
         self.num_landmarks = num_landmarks
         self.pretrained_backbone = pretrained_backbone
         self.in_channels = in_channels
@@ -26,7 +33,7 @@ class MHModel(nn.Module):
         self.num_phi_bins = num_phi_bins
 
         num_outputs = num_landmarks * 2  # Each landmark has (x, y)
-        norm_layer = partial(LayerNorm2d, eps=1e-6)
+        # norm_layer = partial(LayerNorm2d, eps=1e-6)
 
         # Replace first conv for grayscale (if necessary)
         if self.in_channels == 1:
