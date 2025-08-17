@@ -6,6 +6,7 @@ from nn.modules.bottleneck import mobilenet_v2
 from functools import partial
 
 from typing import Literal
+from nn.modules.bottleneck import tiny_vit_11m
 
 class MHModel(nn.Module):
     def __init__(self,
@@ -16,14 +17,19 @@ class MHModel(nn.Module):
                  num_bins: int = 14,
                  num_theta_bins: int = 14,
                  num_phi_bins: int = 14,
-                 backbone: Literal['convnext', 'mobilenet'] = 'convnext') -> None:
+                 backbone: Literal['convnext', 'mobilenet', 'tinyvit'] = 'convnext') -> None:
         """Multi-Head model for landmarks and gaze estimation."""
         super().__init__()
 
         if backbone == 'convnext':
             self.backbone = convnext_tiny(pretrained=pretrained_backbone)
-        else:
+        elif backbone == 'mobilenet':
             self.backbone = mobilenet_v2(pretrained=pretrained_backbone)
+        elif backbone == 'tinyvit':
+            # Pass in_channels so TinyViT supports grayscale without manual conv replacement
+            self.backbone = tiny_vit_11m(pretrained=pretrained_backbone, in_chans=in_channels)
+        else:
+            raise ValueError(f"Unsupported backbone: {backbone}")
 
         self.num_landmarks = num_landmarks
         self.pretrained_backbone = pretrained_backbone
@@ -35,8 +41,8 @@ class MHModel(nn.Module):
         num_outputs = num_landmarks * 2  # Each landmark has (x, y)
         # norm_layer = partial(LayerNorm2d, eps=1e-6)
 
-        # Replace first conv for grayscale (if necessary)
-        if self.in_channels == 1:
+        # Replace first conv layer for CNN backbones 
+        if self.in_channels == 1 and backbone in ('convnext', 'mobilenet'):
             self._replace_first_conv_layer()
 
         self.dropout = nn.Dropout(dropout_rate)

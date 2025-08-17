@@ -26,7 +26,7 @@ def get_args():
     parser.add_argument('--annotation_file', type=str, 
                         help='Annotation file path (required for WFLW)')
     parser.add_argument('--num_landmarks', type=int, default=6, help='Number of facial landmarks')
-    parser.add_argument('--img_size', type=int, default=224, help='Input image size for ConvNeXt')
+    parser.add_argument('--img_size', type=int, default=224, help='Input image size (pixels)')
     parser.add_argument('--input_channels', type=int, default=1, choices=[1, 3], help='Number of input image channels (1 for grayscale, 3 for RGB)')
     parser.add_argument('--batch_size', type=int, default=32, help='Training batch size')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
@@ -53,6 +53,7 @@ def get_args():
     # Model arguments
     parser.add_argument('--no_pretrained_backbone', action='store_true', help='Do not use pretrained backbone weights')
     parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for the model')
+    parser.add_argument('--backbone', type=str, default='mobilenet', choices=['mobilenet', 'convnext', 'tinyvit'], help='Backbone architecture to use')
 
     # Augmentation arguments
     parser.add_argument('--affine_aug', action='store_true', help='Use affine augmentation')
@@ -612,10 +613,11 @@ def main():
         num_bins=args.num_angle_bins,
         num_theta_bins=args.num_theta_bins,
         num_phi_bins=args.num_phi_bins,
-        backbone="mobilenet"
+        backbone=args.backbone
     ).to(device)
     
     print(f"Model: MHModel initialized with {args.num_landmarks} landmarks and {args.input_channels} input channel(s).")
+    print(f"Backbone: {args.backbone}")
     print(f"Backbone pretrained: {not args.no_pretrained_backbone}")
     print(f"Training Modes: {', '.join(args.training_modes).upper()} (Landmark Weight: {args.landmark_loss_weight}, Gaze Weight: {args.gaze_loss_weight}, Head Pose Weight: {args.head_pose_loss_weight})")
 
