@@ -181,12 +181,27 @@ def visualize_attribution(
     return heatmap, overlay
 
 
+def _reverse_normalize(img_t: torch.Tensor, input_channels: int) -> np.ndarray:
+    if input_channels == 1:
+        mean = np.array([0.449], dtype=np.float32)
+        std = np.array([0.226], dtype=np.float32)
+        img_np = img_t.squeeze(0).cpu().numpy() * std[0] + mean[0]
+    else:
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        img_np = img_t.cpu().numpy().transpose(1, 2, 0) * std + mean
+    img_np = np.clip(img_np, 0.0, 1.0)
+    return img_np
+
+
 def main():
     parser = argparse.ArgumentParser(description="Feature attention visualization for MHModel on MPIIFaceGaze")
-    parser.add_argument('--checkpoint', type=str, required=True, help='Path to model checkpoint (.pth)')
+    parser.add_argument('--checkpoint', type=str, help='Path to model checkpoint (.pth)')
+    parser.add_argument('--runs_root', type=str, help='Root containing run_val_X subdirs with best_model.pth')
     parser.add_argument('--dataset_root', type=str, required=True, help='Root path to MPIIFaceGaze dataset (mat or raw)')
     parser.add_argument('--use_mat', action='store_true', help='Use MPIIFaceGazeMatDataset (.mat files)')
     parser.add_argument('--participant_id', type=int, default=0, help='Participant ID (0-14) to sample from')
+    parser.add_argument('--first_n', type=int, default=5, help='When using runs_root, visualize first N subjects starting at 0')
     parser.add_argument('--index', type=int, default=0, help='Global sample index within the filtered dataset')
     parser.add_argument('--img_size', type=int, default=224, help='Model input size')
     parser.add_argument('--input_channels', type=int, default=1, choices=[1, 3], help='Number of input channels')
@@ -201,6 +216,83 @@ def main():
 
     # Data transforms
     transform = build_transforms(args.img_size, args.input_channels)
+
+    # If runs_root is provided, build a single-column overlay figure for first_n subjects
+    if args.runs_root:
+        overlays = []
+        for sid in range(args.first_n):
+            ckpt_path = os.path.join(args.runs_root, f'run_val_{sid}', 'best_model.pth')
+            if not os.path.isfile(ckpt_path):
+                print(f"Warning: checkpoint missing for subject {sid}: {ckpt_path}. Skipping.")
+                continue
+            # Dataset per subject
+            if args.use_mat:
+                dataset = MPIIFaceGazeMatDataset(
+                    dataset_path=args.dataset_root,
+                    participant_ids=[sid],
+                    transform=transform,
+                    input_channels=args.input_channels,
+                    use_cache=False,
+                    use_clahe=False,
+                    downscale_size=args.img_size,
+                    affine_aug=False,
+                    horizontal_flip=False,
+                )
+            else:
+                dataset = MPIIFaceGazeDataset(
+                    dataset_path=args.dataset_root,
+                    participant_ids=[sid],
+                    transform=transform,
+                    is_train=False,
+                    use_cache=False,
+                    input_channels=args.input_channels,
+                    use_clahe=False,
+                )
+            if len(dataset) == 0:
+                print(f"Warning: dataset empty for subject {sid}. Skipping.")
+                continue
+            sample = dataset[args.index % len(dataset)]
+            img_t: torch.Tensor = sample['image']
+            img_np = _reverse_normalize(img_t, args.input_channels)
+
+            model = load_model(
+                checkpoint_path=ckpt_path,
+                num_landmarks=args.num_landmarks,
+                input_channels=args.input_channels,
+                num_bins=args.num_bins,
+                backbone=args.backbone,
+                device=device,
+            )
+            _, overlay = visualize_attribution(
+                model=model,
+                image_tensor=img_t,
+                orig_image_np=img_np,
+                target_head=args.target_head,
+                device=device,
+                backbone=args.backbone,
+            )
+            overlays.append(overlay)
+
+        if not overlays:
+            raise RuntimeError("No overlays were generated. Check runs_root and dataset paths.")
+
+        rows = len(overlays)
+        plt.figure(figsize=(4, 4 * rows))
+        for i, ov in enumerate(overlays):
+            plt.subplot(rows, 1, i + 1)
+            plt.imshow(ov)
+            plt.axis('off')
+        plt.tight_layout()
+
+        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+        plt.savefig(args.output, dpi=200)
+        plt.close()
+        print(f"Saved single-column overlay figure to {args.output}")
+        return
+
+    # Otherwise, single-image mode using --checkpoint and --participant_id
+    if not args.checkpoint:
+        raise ValueError("--checkpoint is required when --runs_root is not provided")
 
     # Dataset
     if args.use_mat:
@@ -233,16 +325,7 @@ def main():
     img_t: torch.Tensor = sample['image']  # [C,H,W]
 
     # Build an unnormalized image for background
-    # Reverse normalization for display
-    if args.input_channels == 1:
-        mean = np.array([0.449], dtype=np.float32)
-        std = np.array([0.226], dtype=np.float32)
-        img_np = img_t.squeeze(0).cpu().numpy() * std[0] + mean[0]
-    else:
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        img_np = img_t.cpu().numpy().transpose(1, 2, 0) * std + mean
-    img_np = np.clip(img_np, 0.0, 1.0)
+    img_np = _reverse_normalize(img_t, args.input_channels)
 
     # Model
     model = load_model(
@@ -255,7 +338,7 @@ def main():
     )
 
     # Attribution
-    heatmap, overlay = visualize_attribution(
+    _, overlay = visualize_attribution(
         model=model,
         image_tensor=img_t,
         orig_image_np=img_np if img_np.ndim == 3 else img_np,
@@ -264,27 +347,11 @@ def main():
         backbone=args.backbone,
     )
 
-    # Save visualization
+    # Save visualization (overlay only)
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     plt.figure(figsize=(4, 4))
-    # plt.subplot(1, 3, 1)
-    # if img_np.ndim == 2:
-    #     plt.imshow(img_np, cmap='gray')
-    # else:
-    #     plt.imshow(img_np)
-    # plt.axis('off')
-    # plt.title('Input')
-
-    # plt.subplot(1, 3, 2)
-    # plt.imshow(heatmap, cmap='jet')
-    # plt.axis('off')
-    # plt.title('Attribution')
-
-    # plt.subplot(1, 3, 3)
     plt.imshow(overlay)
     plt.axis('off')
-    plt.title('Overlay')
-
     plt.tight_layout()
     plt.savefig(args.output, dpi=200)
     plt.close()
